@@ -234,40 +234,95 @@ def build_rough_humanoid() -> Skeleton:
 
 def visualize_open3d(sk: Skeleton, globals_T: Dict[str, np.ndarray]):
     import open3d as o3d
-
     # Build joint positions
     names = list(sk.nodes.keys())
     pos = {n: globals_T[n][:3, 3] for n in names}
 
-    # Lines for parent-child edges
-    points = []
-    idx = {}
-    for i, n in enumerate(names):
-        idx[n] = i
-        points.append(pos[n])
-    points = np.array(points)
+    geoms = []
 
-    lines = []
+    # Create cylinder 'bones' between each parent-child pair.
+    # Cylinder height = distance between joints, radius proportional to node radii.
     for n in names:
         parent = sk.nodes[n].parent
-        if parent is not None:
-            lines.append([idx[parent], idx[n]])
+        if parent is None:
+            continue
+        p0 = pos[parent]
+        p1 = pos[n]
+        v = p1 - p0
+        h = np.linalg.norm(v)
+        if h < 1e-6:
+            continue
 
-    line_set = o3d.geometry.LineSet(
-        points=o3d.utility.Vector3dVector(points),
-        lines=o3d.utility.Vector2iVector(lines),
-    )
+        # choose cylinder radius proportional to the connected node radii
+        r0 = sk.nodes[parent].radius
+        r1 = sk.nodes[n].radius
+        cyl_r = max(0.01, 0.6 * (r0 + r1) * 0.5)
 
-    # Spheres for joints (rough body)
-    geoms = [line_set]
+        cyl = o3d.geometry.TriangleMesh.create_cylinder(radius=cyl_r, height=h, resolution=20, split=4)
+        cyl.compute_vertex_normals()
+
+        # align cylinder z-axis with vector v
+        v_norm = v / h
+        z = np.array([0.0, 0.0, 1.0])
+        # handle special cases for alignment
+        if np.allclose(v_norm, z):
+            R = np.eye(4)
+        elif np.allclose(v_norm, -z):
+            R = R_axis_angle(np.array([1.0, 0.0, 0.0]), np.pi)
+        else:
+            axis = np.cross(z, v_norm)
+            axis = axis / (np.linalg.norm(axis) + 1e-12)
+            angle = np.arccos(np.clip(np.dot(z, v_norm), -1.0, 1.0))
+            R = R_axis_angle(axis, angle)
+
+        mid = (p0 + p1) * 0.5
+        T = T_translate(mid) @ R
+        cyl.transform(T)
+        cyl.paint_uniform_color([0.7, 0.7, 0.7])
+        geoms.append(cyl)
+
+    # Torso: render as a larger vertical cylinder (chest/torso), not a sphere
+    if "torso" in pos:
+        torso_pos = pos["torso"]
+        # estimate top and bottom of torso using head and thighs (fall back to offsets)
+        head_z = pos["head"][2] if "head" in pos else torso_pos[2] + 0.35
+        thigh_names = ["l_thigh", "r_thigh"]
+        thigh_zs = [pos[n][2] for n in thigh_names if n in pos]
+        if thigh_zs:
+            hip_z = min(thigh_zs)
+        else:
+            hip_z = torso_pos[2] - 0.25
+
+        top_z = head_z - 0.05
+        bottom_z = hip_z + 0.02
+        torso_size_coeff = 0.6  # scale down torso size for better visual proportions
+        torso_h = max(0.15, top_z - bottom_z)*torso_size_coeff
+        torso_mid = np.array([torso_pos[0], torso_pos[1], (top_z + bottom_z) * 0.5])
+
+        torso_r = max(0.08, sk.nodes["torso"].radius * 1.8)*torso_size_coeff
+        torso_cyl = o3d.geometry.TriangleMesh.create_cylinder(radius=torso_r, height=torso_h, resolution=40)
+        torso_cyl.compute_vertex_normals()
+        torso_cyl.transform(T_translate(torso_mid))
+        torso_cyl.paint_uniform_color([0.6, 0.6, 0.6])
+        geoms.append(torso_cyl)
+
+    # Spheres for joints (keep head spherical and slightly highlighted)
     for n in names:
+        # skip torso sphere since we render a torso cylinder
+        if n == "torso":
+            continue
         r = sk.nodes[n].radius
         s = o3d.geometry.TriangleMesh.create_sphere(radius=r)
         s.compute_vertex_normals()
         s.translate(pos[n])
+        if n == "head":
+            s.paint_uniform_color([1.0, 0.85, 0.75])
+        else:
+            s.paint_uniform_color([0.9, 0.9, 0.9])
         geoms.append(s)
 
     o3d.visualization.draw_geometries(geoms)
+
 
 # ---------- Demo ----------
 
