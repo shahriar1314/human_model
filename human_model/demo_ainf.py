@@ -71,7 +71,7 @@ def minimise_vfe(o=2.0, mu0=0.0, sigma0=2.0, sigma_o=1.0,
 
 if __name__ == "__main__":
     # Example: prior mean 0, prior std 2; observe o=2 with sensor std 1
-    mu_star, sigma_star, F_hist, mu_hist, sigma_hist = minimise_vfe(o=2.0, mu0=0.0, sigma0=2.0, sigma_o=1.0)
+    mu_star, sigma_star, F_hist, mu_hist, sigma_hist = minimise_vfe(o=-4.0 , mu0=0.0, sigma0=2, sigma_o=1.0)
     print("\nLearned posterior q(s)=N(mu, sigma^2):")
     print("mu   =", mu_star)
     print("sigma=", sigma_star)
@@ -124,6 +124,6 @@ if __name__ == "__main__":
     ax3.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('vfe_results.png', dpi=150, bbox_inches='tight')
-    print("\n✓ Graphs saved to 'vfe_results.png'")
+    # plt.savefig('vfe_results.png', dpi=150, bbox_inches='tight')
+    # print("\n✓ Graphs saved to 'vfe_results.png'")
     plt.show()

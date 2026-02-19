@@ -434,4 +434,229 @@ Active inference here is doing:
 
 ---
 
-If you tell me the numbers you used ((\mu_0,\sigma_0,o,\sigma_o)), I can interpret your exact curves precisely (e.g., why (\mu) converges near 1.6, why (\sigma) settles near ~0.89).
+
+# **Changing Parameters & Their Effect**
+
+The best way to understand Active Inference is to **systematically vary one parameter at a time** and observe how:
+
+* Posterior mean ( \mu )
+* Posterior variance ( \sigma^2 )
+* Free energy curve
+* Prior / likelihood / posterior shape
+
+change.
+
+Below is a structured guide.
+
+---
+
+# First: The Key Parameters
+
+In your 1D example, the important variables are:
+
+| Symbol       | Meaning               | Controls            |
+| ------------ | --------------------- | ------------------- |
+| ( \mu_0 )    | Prior mean            | Where belief starts |
+| ( \sigma_0 ) | Prior std             | Confidence in prior |
+| ( o )        | Observation           | Sensor reading      |
+| ( \sigma_o ) | Observation noise std | Sensor reliability  |
+
+---
+
+# 1️⃣ Vary the Prior Strength (σ₀)
+
+Keep:
+
+* ( o = 2 )
+* ( \sigma_o = 1 )
+
+Now try:
+
+### Case A: Weak prior
+
+[
+\sigma_0 = 5
+]
+
+What happens?
+
+* Prior is very wide
+* Posterior moves very close to observation
+* Sensor dominates
+
+### Case B: Strong prior
+
+[
+\sigma_0 = 0.3
+]
+
+What happens?
+
+* Prior very narrow
+* Posterior stays near prior mean
+* Data has less influence
+
+### What you learn
+
+> Active inference balances prior confidence vs sensory evidence.
+
+---
+
+# 2️⃣ Vary Sensor Noise (σₒ)
+
+Keep:
+
+* ( \mu_0 = 0 )
+* ( \sigma_0 = 2 )
+* ( o = 2 )
+
+Now try:
+
+### Case A: Very reliable sensor
+
+[
+\sigma_o = 0.2
+]
+
+Posterior:
+
+* Very sharp
+* Mean moves close to ( o )
+
+### Case B: Very noisy sensor
+
+[
+\sigma_o = 5
+]
+
+Posterior:
+
+* Stays near prior
+* Wide uncertainty
+
+### What you learn
+
+> The more precise the sensor, the more the posterior trusts data.
+
+---
+
+# 3️⃣ Vary the Observation (o)
+
+Keep:
+
+* ( \mu_0 = 0 )
+* ( \sigma_0 = 2 )
+* ( \sigma_o = 1 )
+
+Try:
+
+* ( o = 0.5 )
+* ( o = 3 )
+* ( o = -4 )
+
+What happens?
+
+* Posterior shifts toward observation
+* But never fully ignores prior (unless prior very weak)
+
+---
+
+# 4️⃣ Extreme Scenarios (very educational)
+
+### Case 1: Very strong prior + strong sensor
+
+* Small ( \sigma_0 )
+* Small ( \sigma_o )
+
+Result:
+
+* Posterior is compromise weighted by relative precision
+
+### Case 2: Weak prior + strong sensor
+
+Posterior ≈ observation
+
+### Case 3: Strong prior + weak sensor
+
+Posterior ≈ prior
+
+---
+
+# 5️⃣ Watch the Free Energy Curve
+
+When parameters are extreme:
+
+* Large disagreement between prior and observation → higher initial free energy
+* Strong prior or strong sensor → faster convergence
+
+Try changing learning rate too:
+
+* Too large → oscillation
+* Too small → slow convergence
+
+---
+
+# 6️⃣ Code Modifications to Experiment
+
+In your script, change this line:
+
+```python
+minimise_vfe(o=2.0, mu0=0.0, sigma0=2.0, sigma_o=1.0)
+```
+
+Try:
+
+```python
+# Weak prior
+minimise_vfe(o=2.0, mu0=0.0, sigma0=5.0, sigma_o=1.0)
+
+# Strong prior
+minimise_vfe(o=2.0, mu0=0.0, sigma0=0.3, sigma_o=1.0)
+
+# Strong sensor
+minimise_vfe(o=2.0, mu0=0.0, sigma0=2.0, sigma_o=0.2)
+
+# Noisy sensor
+minimise_vfe(o=2.0, mu0=0.0, sigma0=2.0, sigma_o=5.0)
+```
+
+---
+
+# 7️⃣ What You Should Observe Conceptually
+
+Active Inference is just:
+
+[
+\text{Posterior mean}
+=====================
+
+\frac{
+\frac{\mu_0}{\sigma_0^2}
++
+\frac{o}{\sigma_o^2}
+}{
+\frac{1}{\sigma_0^2}
++
+\frac{1}{\sigma_o^2}
+}
+]
+
+Notice:
+
+* Smaller variance = higher precision = more influence.
+
+So the whole system is really a **precision-weighted average**.
+
+---
+
+# 8️⃣ Deep Insight
+
+By varying these parameters, you will see:
+
+* Free energy minimisation = Bayesian inference
+* Belief updates are driven by precision weighting
+* Complexity term pulls toward prior
+* Accuracy term pulls toward observation
+
+---
+
