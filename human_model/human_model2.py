@@ -57,6 +57,13 @@ KP = {
 }
 
 # Bone graph used for kinematics/tree construction
+# Replace ONLY the connectivity lists in your code with the ones below.
+# Everything else can stay the same.
+
+# --- Bone graph used for kinematics/tree construction (parent -> child) ---
+# Changed:
+#   ("NECK","R_HIP") -> ("R_SHOULDER","R_HIP")
+#   ("NECK","L_HIP") -> ("L_SHOULDER","L_HIP")
 BONES = [
     ("NECK", "NOSE"),
     ("NOSE", "R_EYE"), ("R_EYE", "R_EAR"),
@@ -65,11 +72,15 @@ BONES = [
     ("NECK", "R_SHOULDER"), ("R_SHOULDER", "R_ELBOW"), ("R_ELBOW", "R_WRIST"),
     ("NECK", "L_SHOULDER"), ("L_SHOULDER", "L_ELBOW"), ("L_ELBOW", "L_WRIST"),
 
-    ("NECK", "R_HIP"), ("R_HIP", "R_KNEE"), ("R_KNEE", "R_ANKLE"),
-    ("NECK", "L_HIP"), ("L_HIP", "L_KNEE"), ("L_KNEE", "L_ANKLE"),
+    # hips now connect to their respective shoulders
+    ("R_SHOULDER", "R_HIP"), ("R_HIP", "R_KNEE"), ("R_KNEE", "R_ANKLE"),
+    ("L_SHOULDER", "L_HIP"), ("L_HIP", "L_KNEE"), ("L_KNEE", "L_ANKLE"),
 ]
 
-# Connectivity for 2D visualization (matches your reference diagram indices)
+# --- 2D visualization connectivity (matches your new preference) ---
+# Changed:
+#   (1,8) -> (2,8)
+#   (1,11) -> (5,11)
 BODY18_EDGES_2D = [
     (1, 0),
     (0, 14), (14, 16),
@@ -78,9 +89,12 @@ BODY18_EDGES_2D = [
     (1, 2), (2, 3), (3, 4),
     (1, 5), (5, 6), (6, 7),
 
-    (1, 8), (8, 9), (9, 10),
-    (1, 11), (11, 12), (12, 13),
+    # hips now connect to shoulders
+    (2, 8), (8, 9), (8, 11), (9, 10), 
+    (5, 11), (11, 12), (12, 13),
 ]
+
+
 
 FACE_IDXS = {0, 14, 15, 16, 17}
 HAND_FOOT_IDXS = {4, 7, 10, 13}
