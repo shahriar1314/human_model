@@ -148,7 +148,7 @@ def main(opt):
             # Retrieve bodies
             zed.retrieve_bodies(bodies, body_runtime_param)
 
-            # ---- inside while loop, after retrieve_bodies(...) ----
+            # loop to print 3D keypoints of each detected person every 30 frames
             frame_idx += 1
             if frame_idx % 30 == 0:
                 for body in bodies.body_list:
@@ -195,3 +195,5 @@ if __name__ == '__main__':
         print("Specify only input_svo_file or ip_address, or none to use wired camera, not both. Exit program")
         exit()
     main(opt) 
+
+    
