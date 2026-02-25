@@ -71,7 +71,8 @@ def minimise_vfe(o=2.0, mu0=0.0, sigma0=2.0, sigma_o=1.0,
 
 if __name__ == "__main__":
     # Example: prior mean 0, prior std 2; observe o=2 with sensor std 1
-    mu_star, sigma_star, F_hist, mu_hist, sigma_hist = minimise_vfe(o=-4.0 , mu0=0.0, sigma0=2, sigma_o=1.0)
+    o = 2.0
+    mu_star, sigma_star, F_hist, mu_hist, sigma_hist = minimise_vfe(o=o , mu0=0.0, sigma0=2, sigma_o=1.0)
     print("\nLearned posterior q(s)=N(mu, sigma^2):")
     print("mu   =", mu_star)
     print("sigma=", sigma_star)
@@ -108,7 +109,7 @@ if __name__ == "__main__":
     ax3.plot(x, prior, 'b-', linewidth=2, label='Prior p(s)', alpha=0.7)
     
     # Likelihood p(o|s) = N(2, 1^2) (observation o=2 with noise std 1)
-    likelihood = norm.pdf(x, loc=2.0, scale=1.0)
+    likelihood = norm.pdf(x, loc=o, scale=1.0)
     ax3.plot(x, likelihood, 'g-', linewidth=2, label='Likelihood p(o|s)', alpha=0.7)
     
     # Posterior q(s) = N(mu_star, sigma_star^2)
