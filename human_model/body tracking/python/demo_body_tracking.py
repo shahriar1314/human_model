@@ -32,6 +32,22 @@ import cv_viewer.tracking_viewer as cv_viewer
 import numpy as np
 import argparse
 
+# COCO-18 style naming (commonly used). Verify indices with ZED docs if needed.
+KP18_NAMES = [
+    "nose","neck",
+    "r_shoulder","r_elbow","r_wrist",
+    "l_shoulder","l_elbow","l_wrist",
+    "r_hip","r_knee","r_ankle",
+    "l_hip","l_knee","l_ankle",
+    "r_eye","l_eye","r_ear","l_ear"
+]
+
+def is_valid_xyz(p):
+    return (p is not None
+            and len(p) == 3
+            and all(isinstance(v, (int, float, np.floating)) for v in p)
+            and all(math.isfinite(float(v)) for v in p))
+
 def parse_args(init, opt):
     if len(opt.input_svo_file)>0 and opt.input_svo_file.endswith((".svo", ".svo2")):
         init.set_from_svo_file(opt.input_svo_file)
@@ -123,6 +139,7 @@ def main(opt):
     bodies = sl.Bodies()
     image = sl.Mat()
     key_wait = 10 
+    frame_idx = 0
     while viewer.is_available():
         # Grab an image
         if zed.grab() <= sl.ERROR_CODE.SUCCESS:
@@ -131,39 +148,18 @@ def main(opt):
             # Retrieve bodies
             zed.retrieve_bodies(bodies, body_runtime_param)
 
-            # COCO-18 style naming (commonly used). Verify indices with ZED docs if needed.
-            KP18_NAMES = [
-                "nose","neck",
-                "r_shoulder","r_elbow","r_wrist",
-                "l_shoulder","l_elbow","l_wrist",
-                "r_hip","r_knee","r_ankle",
-                "l_hip","l_knee","l_ankle",
-                "r_eye","l_eye","r_ear","l_ear"
-            ]
-
-            def is_valid_xyz(p):
-                return (p is not None
-                        and len(p) == 3
-                        and all(isinstance(v, (int, float, np.floating)) for v in p)
-                        and all(math.isfinite(float(v)) for v in p))
-
             # ---- inside while loop, after retrieve_bodies(...) ----
-            for body in bodies.body_list:
-                # Only use tracked/valid bodies
-                if body.tracking_state != sl.OBJECT_TRACKING_STATE.OK:
-                    continue
-
-                # body.keypoint is an array-like of shape (18, 3) for BODY_18
-                kps3d = np.array(body.keypoint, dtype=np.float32)  # meters
-
-                # Example: print as (person_id, joint_name, x,y,z)
-                # Coordinate system is what you set in init_params.coordinate_system
-                print(f"\nPerson ID: {body.id} | conf: {body.confidence} | state: {body.tracking_state}")
-                for i in range(min(len(kps3d), 18)):
-                    p = kps3d[i]
-                    if is_valid_xyz(p):
-                        name = KP18_NAMES[i] if i < len(KP18_NAMES) else f"kp_{i}"
-                        print(f"  {i:02d} {name:>10s}: x={p[0]: .3f}  y={p[1]: .3f}  z={p[2]: .3f}")
+            frame_idx += 1
+            if frame_idx % 30 == 0:
+                for body in bodies.body_list:
+                    if body.tracking_state != sl.OBJECT_TRACKING_STATE.OK:
+                        continue
+                    kps3d = np.array(body.keypoint, dtype=np.float32)
+                    print(f"\nPerson ID: {body.id} | conf: {body.confidence}")
+                    for i in range(min(len(kps3d), 18)):
+                        p = kps3d[i]
+                        if is_valid_xyz(p):
+                            print(f"{KP18_NAMES[i]}: {p[0]:.3f} {p[1]:.3f} {p[2]:.3f}")
 
             # Update GL view
             viewer.update_view(image, bodies) 
