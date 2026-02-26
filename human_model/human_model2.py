@@ -311,26 +311,59 @@ def render_body18_2d(
 # -------------------- Example usage (with visualization) --------------------
 
 if __name__ == "__main__":
-    # ---- 3D keypoints example (meters) ----
+    # ---- 3D keypoints for standing human model (meters) ----
+    # Standard proportions: ~1.7m tall human in T-pose standing position
+    # X-axis: left-right (positive = right), Y-axis: vertical (up), Z-axis: depth (forward)
+    
     kp3d = np.zeros((18, 3), dtype=float)
-    kp3d[KP["NECK"]] = [0.0, 1.5, 2.0]
-    kp3d[KP["NOSE"]] = [0.0, 1.65, 2.0]
-    kp3d[KP["R_SHOULDER"]] = [0.2, 1.5, 2.0]
-    kp3d[KP["L_SHOULDER"]] = [-0.2, 1.5, 2.0]
-    kp3d[KP["R_ELBOW"]] = [0.45, 1.35, 2.0]
-    kp3d[KP["L_ELBOW"]] = [-0.45, 1.35, 2.0]
-    kp3d[KP["R_WRIST"]] = [0.6, 1.2, 2.0]
-    kp3d[KP["L_WRIST"]] = [-0.6, 1.2, 2.0]
-    kp3d[KP["R_HIP"]] = [0.15, 1.0, 2.0]
-    kp3d[KP["L_HIP"]] = [-0.15, 1.0, 2.0]
-    kp3d[KP["R_KNEE"]] = [0.15, 0.6, 2.0]
-    kp3d[KP["L_KNEE"]] = [-0.15, 0.6, 2.0]
-    kp3d[KP["R_ANKLE"]] = [0.15, 0.2, 2.0]
-    kp3d[KP["L_ANKLE"]] = [-0.15, 0.2, 2.0]
-    kp3d[KP["R_EYE"]] = [0.05, 1.68, 2.0]
-    kp3d[KP["L_EYE"]] = [-0.05, 1.68, 2.0]
-    kp3d[KP["R_EAR"]] = [0.12, 1.68, 2.0]
-    kp3d[KP["L_EAR"]] = [-0.12, 1.68, 2.0]
+    
+    # Head and Face (Y: 1.65-1.70m)
+    kp3d[KP["NOSE"]] = [0.0, 1.65, 0.0]      # Front of face
+    kp3d[KP["R_EYE"]] = [0.08, 1.68, 0.05]   # Right eye
+    kp3d[KP["L_EYE"]] = [-0.08, 1.68, 0.05]  # Left eye
+    kp3d[KP["R_EAR"]] = [0.12, 1.65, 0.0]    # Right ear
+    kp3d[KP["L_EAR"]] = [-0.12, 1.65, 0.0]   # Left ear
+    
+    # Neck (Y: 1.50m)
+    kp3d[KP["NECK"]] = [0.0, 1.50, 0.0]
+    
+    # Shoulders (Y: 1.50m, width: ~0.40m total)
+    kp3d[KP["R_SHOULDER"]] = [0.20, 1.50, 0.0]
+    kp3d[KP["L_SHOULDER"]] = [-0.20, 1.50, 0.0]
+    
+    # Right Arm (upper arm ~0.30m, forearm ~0.25m)
+    kp3d[KP["R_ELBOW"]] = [0.35, 1.20, 0.0]   # Elbow at ~1.2m height
+    kp3d[KP["R_WRIST"]] = [0.50, 0.95, 0.0]   # Hand at ~1.0m height
+    
+    # Left Arm (mirror of right)
+    kp3d[KP["L_ELBOW"]] = [-0.35, 1.20, 0.0]
+    kp3d[KP["L_WRIST"]] = [-0.50, 0.95, 0.0]
+    
+    # Hips (Y: 1.00m, width: ~0.30m)
+    kp3d[KP["R_HIP"]] = [0.15, 1.00, 0.0]
+    kp3d[KP["L_HIP"]] = [-0.15, 1.00, 0.0]
+    
+    # Right Leg (thigh ~0.40m, calf ~0.40m)
+    kp3d[KP["R_KNEE"]] = [0.15, 0.60, 0.0]   # Knee at ~0.6m height
+    kp3d[KP["R_ANKLE"]] = [0.15, 0.10, 0.0]  # Foot at ~0.1m height
+    
+    # Left Leg (mirror of right)
+    kp3d[KP["L_KNEE"]] = [-0.15, 0.60, 0.0]
+    kp3d[KP["L_ANKLE"]] = [-0.15, 0.10, 0.0]
+    
+    # ---- Print all 18 keypoint coordinates ----
+    print("\n" + "="*70)
+    print("BODY_18 KEYPOINT 3D COORDINATES (Standing Position)")
+    print("="*70)
+    print("Format: [X (left-right), Y (height), Z (depth)] in meters\n")
+    
+    for name, idx in sorted(KP.items(), key=lambda x: x[1]):
+        x, y, z = kp3d[idx]
+        print(f"{idx:2d}. {name:15s}: [{x:7.3f}, {y:7.3f}, {z:7.3f}]")
+    
+    print("\n" + "="*70)
+    print("FORWARD KINEMATICS (World Transforms)")
+    print("="*70 + "\n")
 
     globals_T, rel_T = forward_kinematics_body18(kp3d, use_virtual_root=True)
 
