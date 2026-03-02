@@ -1,390 +1,418 @@
-# Active Inference Human Model (ZED BODY_18)
+# Active Inference Human Pose Modeling with ZED BODY_18
 
-This project implements a **real-time human pose modeling system** using:
+This repository implements a **real-time human pose modeling** pipeline using:
 
-* **ZED BODY_18 3D keypoints** (observations)
-* A **kinematic human model** parameterized by joint angles
-* **Variational Free Energy (VFE) minimization**
-* **Active Inference principles**
+* **ZED SDK BODY_18** 3D keypoints as observations
+* A **kinematic human model** parameterized by **main joint angles**
+* **Active Inference (AInf)** using a **Laplace approximation** (Gauss–Newton belief updates)
+* **Variational Free Energy (VFE)** minimization with:
 
-Instead of directly fitting 18×3 keypoints, the system infers a compact set of **main joint angles** (shoulders, elbows, hips, knees) that best explain the observed pose while respecting symmetry and joint limits.
+  * Gaussian likelihood (precision-weighted prediction errors)
+  * Priors (joint limits + symmetry)
+  * Dynamics prior (temporal smoothness)
 
----
-
-# 1. Conceptual Overview
-
-## 1.1 What Problem Is Solved?
-
-Given:
-
-* Real-time 3D keypoints from ZED
-
-We want:
-
-* A structured, interpretable human model
-* That respects kinematics
-* And minimizes prediction error under priors
-
-We treat:
-
-* Joint angles = latent variables
-* ZED keypoints = observations
-* Free Energy = objective to minimize
+The system maintains a belief over latent joint angles and updates it online as new frames arrive.
 
 ---
 
-# 2. System Architecture
+## 1. Repository Structure
 
 ```text
 ai_human_model/
-│
-├── main.py
-├── zed_body18_stream.py
-├── human_kinematic_model.py
-└── vfe_inference.py
+  main.py
+  zed_body18_stream.py
+  human_kinematic_model.py
+  vfe_inference.py
 ```
 
----
+### File roles
 
-# 3. Generative Model (human_kinematic_model.py)
-
-## 3.1 Parameterization
-
-We **do NOT optimize 18×3 points**.
-
-Instead, we optimize **16 joint angles**:
-
-| Joint          | DOF                  |
-| -------------- | -------------------- |
-| Left shoulder  | yaw, pitch, roll (3) |
-| Right shoulder | yaw, pitch, roll (3) |
-| Left elbow     | flexion (1)          |
-| Right elbow    | flexion (1)          |
-| Left hip       | yaw, pitch, roll (3) |
-| Right hip      | yaw, pitch, roll (3) |
-| Left knee      | flexion (1)          |
-| Right knee     | flexion (1)          |
-
-Total parameters: **16**
-
-Face joints (eyes, ears, nose) are fixed offsets from neck and not optimized.
+| File                       | Purpose                                                                                                  |
+| -------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `zed_body18_stream.py`     | Reads ZED frames and provides live BODY_18 keypoints (+ optional per-joint confidence)                   |
+| `human_kinematic_model.py` | Defines the **generative (kinematic) model** mapping joint angles → predicted 18 keypoints               |
+| `vfe_inference.py`         | Implements **Active Inference** (belief update via free energy minimization under Laplace approximation) |
+| `main.py`                  | Runs the full pipeline and prints prediction errors + action hints                                       |
 
 ---
 
-## 3.2 Fixed Segment Lengths
+## 2. Conceptual Model
 
-Segment lengths are extracted once from a template skeleton:
+### 2.1 Observations
+
+At each time step (t), ZED provides:
+
+[
+Y_t = {y_{t,i} \in \mathbb{R}^3}_{i=1}^{18}
+]
+
+These are the **3D coordinates** of BODY_18 joints.
+
+Optionally, ZED can provide per-joint confidence:
+
+[
+c_{t,i} \in [0, 100]
+]
+
+---
+
+### 2.2 Latent variables (what we infer)
+
+We infer a low-dimensional latent state:
+
+[
+\theta_t \in \mathbb{R}^{16}
+]
+
+These 16 variables are joint angles for the main limbs:
+
+* Left shoulder: yaw, pitch, roll (3)
+* Right shoulder: yaw, pitch, roll (3)
+* Left elbow: flexion (1)
+* Right elbow: flexion (1)
+* Left hip: yaw, pitch, roll (3)
+* Right hip: yaw, pitch, roll (3)
+* Left knee: flexion (1)
+* Right knee: flexion (1)
+
+Face joints are not modeled as angles; they are fixed offsets from the neck.
+
+---
+
+## 3. Generative Model (human_kinematic_model.py)
+
+### 3.1 Fixed morphology (bone lengths not optimized)
+
+We use a canonical template skeleton once at startup to compute segment lengths:
 
 * Torso length
-* Shoulder width
-* Hip width
-* Upper arm length
-* Lower arm length
-* Thigh length
-* Calf length
+* Shoulder offset
+* Hip offset
+* Upper arm, lower arm
+* Thigh, calf
 
-These remain constant (bone lengths not optimized).
+These are **fixed** for the whole run (your requirement).
+
+### 3.2 Kinematic forward model
+
+The generative model (g(\theta)) maps joint angles to predicted keypoints:
+
+[
+\hat{X}_t = g(\theta_t)
+\quad\in\mathbb{R}^{18\times 3}
+]
+
+This happens via forward kinematics:
+
+* Pelvis at origin
+* Neck above pelvis
+* Shoulders/hips placed laterally using fixed offsets
+* Arms generated by shoulder rotation + elbow hinge
+* Legs generated by hip rotation + knee hinge
+
+Face points use fixed offsets from the neck.
+
+Output is a predicted skeleton in a **canonical frame** (body-centered).
 
 ---
 
-## 3.3 Forward Kinematics
+## 4. Pose Alignment (global pose as latent nuisance)
 
-The forward model does:
-
-1. Pelvis at origin
-2. Neck above pelvis
-3. Shoulders placed laterally
-4. Arms generated via:
-
-   * Shoulder rotation
-   * Elbow hinge
-5. Legs generated via:
-
-   * Hip rotation
-   * Knee hinge
-6. Face offsets added
-
-Output:
-
-```
-(18,3) canonical keypoints
-```
-
-This is the generative model:
+The predicted skeleton is in a canonical body frame. ZED observations are in the camera/world frame.
+Before comparing, we infer a rigid transform:
 
 [
-\hat{o} = g(\theta)
+y_{t,i} \approx R_t \hat{x}_{t,i} + t_t
 ]
+
+where:
+
+* (R_t \in SO(3))
+* (t_t \in \mathbb{R}^3)
+
+We infer (R_t, t_t) by Kabsch alignment using anchor joints (default: neck + shoulders + hips).
+This removes global translation/rotation so errors reflect mostly articulation.
 
 ---
 
-# 4. Inference via Free Energy (vfe_inference.py)
+## 5. Likelihood (precision-weighted prediction errors)
 
-## 4.1 Alignment (Pose Removal)
-
-Before comparing prediction and observation, we remove global pose:
-
-We compute rigid transform:
+We assume Gaussian observation noise:
 
 [
-live \approx R \cdot predicted + t
+p(Y_t \mid \theta_t) = \prod_i \mathcal{N}(y_{t,i}; \hat{y}*{t,i}, \Sigma*{t,i})
 ]
 
-using **Kabsch alignment** on anchor joints (default: neck + shoulders + hips).
+This implies the negative log-likelihood (accuracy term) is a weighted squared error:
 
-This ensures we compare articulation, not global position.
+[
+F_{\text{obs}}(\theta_t) =
+\frac{1}{2}\sum_i \pi_{t,i}|y_{t,i} - \hat{y}_{t,i}|^2
+]
+
+with precision:
+
+[
+\pi_{t,i} = \Sigma_{t,i}^{-1}
+]
+
+### Confidence-based precision (optional)
+
+If ZED joint confidence is available, we map confidence → sigma:
+
+* high confidence → smaller (\sigma) → higher precision
+* low confidence → larger (\sigma) → lower precision
+
+This is a key “proper AInf” feature: **precision weighting**.
 
 ---
 
-## 4.2 Likelihood (Accuracy Term)
+## 6. Priors (complexity terms)
 
-Assume Gaussian observation model:
+Your requirements: no bone-length priors, only:
 
-[
-p(o | \theta) = \mathcal{N}(o ; \hat{o}, \sigma^2 I)
-]
-
-Accuracy term:
-
-[
-\text{accuracy} = \frac{1}{2\sigma^2} | o - \hat{o} |^2
-]
-
-`sigma` controls noise sensitivity.
-
----
-
-## 4.3 Priors
-
-### 1. Joint Limits
+### 6.1 Joint limits prior
 
 Soft constraint:
 
-* If angle inside limits → no penalty
-* If outside → quadratic penalty
+* No penalty inside limits
+* Quadratic penalty outside limits
 
 Implemented as:
 
-```
-relu(min - angle)^2 + relu(angle - max)^2
-```
+[
+\text{relu}(\theta_{\min}-\theta)^2 + \text{relu}(\theta-\theta_{\max})^2
+]
 
-Limits defined in:
+Limits are defined in:
 
-```
-default_joint_limits_radians()
-```
+* `default_joint_limits_radians()` in `human_kinematic_model.py`
 
----
-
-### 2. Symmetry Prior
+### 6.2 Symmetry prior
 
 Encourages left/right similarity:
 
-* Shoulder yaw mirrored
-* Shoulder pitch similar
-* Elbows similar
-* Knees similar
+* yaw mirrored (L ≈ −R)
+* pitch same
+* elbow flexions similar
+* knee flexions similar
 
-Helps prevent unrealistic asymmetric poses.
+This reduces unrealistic asymmetric solutions.
 
 ---
 
-## 4.4 Free Energy Objective
+## 7. Dynamics prior (temporal AInf)
+
+Active inference is an online inference process over time.
+
+We impose a temporal prior:
 
 [
-F(\theta) =
-\underbrace{\text{prediction error}}*{\text{accuracy}}
-+
-w*{limits} \cdot \text{limits prior}
-+
-w_{sym} \cdot \text{symmetry prior}
+p(\theta_t\mid\theta_{t-1})=\mathcal{N}(\theta_t;\theta_{t-1},\sigma_{dyn}^2 I)
 ]
 
-Minimized via Adam optimizer.
+This discourages sudden angle jumps and stabilizes tracking.
 
 ---
 
-# 5. Optimization Process
+## 8. Variational Free Energy Objective
 
-For each frame:
+At each time step, we minimize:
 
-1. Initialize angles (warm start from previous frame)
-2. Run Adam for `iters` steps
-3. Compute:
+[
+F(\theta_t) =
+F_{\text{obs}}(\theta_t)
++
+w_{limits}F_{limits}(\theta_t)
++
+w_{sym}F_{sym}(\theta_t)
++
+F_{dyn}(\theta_t, \theta_{t-1})
+]
 
-   * Predicted aligned keypoints
-   * Per-joint L2 errors
-   * Mean error
-   * RMSE
-
-Warm start is crucial for real-time performance.
-
----
-
-# 6. Active Inference Component
-
-Active inference includes **action to reduce expected free energy**.
-
-In this implementation:
-
-If many joints are invalid (occlusion/low confidence):
-
-```
-[Action hint] Move viewpoint / reduce occlusion
-```
-
-This approximates reducing uncertainty in observations.
+This is exactly what `vfe_inference.py` computes.
 
 ---
 
-# 7. Runtime Characteristics
+## 9. “Proper” Active Inference Update (Laplace / Gauss–Newton)
 
-## 7.1 Parameters
+Unlike generic Adam “solve-from-scratch”, this implementation maintains a belief:
 
-Optimized variables: 16 angles
+[
+q(\theta_t) \approx \mathcal{N}(\mu_t, \Sigma_t)
+]
 
-This is lightweight compared to optimizing 18×3 coordinates.
+* (\mu_t) is the posterior mean (current best angles)
+* (\Lambda_t = \Sigma_t^{-1}) is precision
 
----
+### Update step
 
-## 7.2 Real-Time Feasibility
+We apply a Laplace update:
 
-Approximate performance:
+[
+\mu \leftarrow \mu - H^{-1}\nabla_\mu F
+]
 
-| Setup | Iterations | Expected Runtime |
-| ----- | ---------- | ---------------- |
-| CPU   | 60         | 30–200 ms        |
-| GPU   | 60         | 3–15 ms          |
-| GPU   | 10–20      | 1–5 ms           |
+with a Gauss–Newton approximation:
 
-Recommended for 30 FPS:
+[
+H \approx J^T J + \Lambda_{dyn}
+]
 
-* 5–20 iterations
-* Warm start
-* Possibly update every 2–3 frames
+* (J) = Jacobian of precision-weighted residuals wrt angles
+* (\Lambda_{dyn}) comes from the dynamics prior
 
----
+We also add damping (Levenberg) for stability.
 
-# 8. Output Interpretation
+This is implemented in:
 
-Printed table:
-
-| Column   | Meaning                          |
-| -------- | -------------------------------- |
-| live_*   | ZED keypoints                    |
-| pred_*   | Model prediction after alignment |
-| dx/dy/dz | Residual error                   |
-| L2(m)    | 3D Euclidean distance error      |
-
-Mean and RMSE summarize global fit quality.
+* `AInfLaplacePoseEstimator` in `vfe_inference.py`
 
 ---
 
-# 9. Usage
+## 10. Output Metrics
 
-## Live camera
+For each joint:
+
+* residual vector:
+
+[
+e_i = y_i - \hat{y}_i
+]
+
+* L2 error in meters:
+
+[
+E_i = |e_i|_2
+]
+
+Summary:
+
+* mean L2
+* RMSE (penalizes large errors)
+
+---
+
+## 11. Action Selection (Active Inference “action”)
+
+Active inference also chooses actions to reduce expected free energy.
+Here we implement a practical proxy:
+
+* If many joints are missing/invalid OR posterior uncertainty is high → output an action hint:
+
+  * move camera closer
+  * reduce occlusion
+  * change viewpoint
+
+### Uncertainty proxy
+
+We compute:
+
+[
+\text{uncertainty} = \text{trace}(\Sigma) = \text{trace}(\Lambda^{-1})
+]
+
+Higher values mean less certainty about inferred angles.
+
+---
+
+## 12. Running the Code
+
+### Live camera
 
 ```bash
 python3 main.py
 ```
 
-## Control update rate
+### Replay SVO
+
+```bash
+python3 main.py --input_svo_file /path/to/file.svo2
+```
+
+### Reduce prints (longer interval)
 
 ```bash
 python3 main.py --print_every 120
 ```
 
-## Adjust optimization strength
+### Faster inference (recommended start)
 
 ```bash
-python3 main.py --iters 80 --lr 0.02
+python3 main.py --gn_steps 1 --print_every 30
 ```
 
-## Replay SVO
+### More smoothing (stronger dynamics prior)
+
+Increase `sigma_dyn` (more permissive) or decrease it (more smoothing):
 
 ```bash
-python3 main.py --input_svo_file file.svo2
+python3 main.py --sigma_dyn 0.15
 ```
 
----
+### Use confidence-based precision (automatic)
 
-# 10. Key Design Decisions
-
-### Why not optimize 18×3 keypoints directly?
-
-Because:
-
-* No anatomical constraints
-* No interpretability
-* No joint limits
-* Overfits noise
-
-Angle-based modeling ensures:
-
-* Physical plausibility
-* Lower dimensional state
-* Better generalization
+If your ZED SDK exposes `body.keypoint_confidence`, it will be used automatically.
 
 ---
 
-# 11. Limitations
+## 13. Important Parameters
 
-* No spine articulation
-* No ankle rotation
-* No neck orientation
-* Face points not optimized
-* No temporal smoothing beyond warm start
-
----
-
-# 12. Extensions
-
-To improve realism:
-
-* Add neck yaw/pitch
-* Add spine bend
-* Add ankle DOF
-* Add temporal prior
-* Replace per-frame optimization with EKF
-* Use amortized neural inference + VFE refinement
+| Argument                     | Meaning                                            |
+| ---------------------------- | -------------------------------------------------- |
+| `--sigma_obs`                | observation noise baseline (meters)                |
+| `--sigma_dyn`                | dynamics noise (smaller = more temporal smoothing) |
+| `--gn_steps`                 | number of Laplace update steps per frame           |
+| `--damping`                  | stabilizes Hessian inversion                       |
+| `--w_limits`                 | strength of joint limits prior                     |
+| `--w_sym`                    | strength of symmetry prior                         |
+| `--sigma_min`, `--sigma_max` | bounds used in confidence→sigma mapping            |
 
 ---
 
-# 13. Mathematical Summary
+## 14. Performance Notes
 
-Generative model:
+This AInf implementation computes a Jacobian via autograd. That is heavier than the Adam version.
 
-[
-\hat{o} = Align(g(\theta))
-]
+Practical guidance:
 
-Free energy:
-
-[
-F(\theta) =
-\frac{1}{2\sigma^2}|o - \hat{o}|^2
-+
-\lambda_1 \text{JointLimits}
-+
-\lambda_2 \text{Symmetry}
-]
-
-Optimization:
-
-[
-\theta_{t+1} = \theta_t - \eta \nabla_\theta F
-]
+* Start with `gn_steps=1`
+* Update inference every few frames if needed
+* Keep state dimension low (16 angles is feasible)
 
 ---
 
-# 14. Final Interpretation
+## 15. Limitations
 
-This system:
+* No spine DOFs
+* No neck/head rotation angles
+* No ankle DOFs
+* Face points fixed offsets (can contribute to residual error)
+* Kabsch alignment removes global motion; interpretation is articulation difference
 
-* Converts noisy keypoints into structured human kinematics
-* Applies principled Bayesian reasoning (Active Inference)
-* Maintains physical plausibility via priors
-* Works online with iterative belief updates
+---
 
-It is a simplified but conceptually correct Active Inference human pose model suitable for research and experimentation.
+## 16. Extensions
+
+Recommended improvements:
+
+1. Add neck yaw/pitch (2 DOF)
+2. Add torso bend (1–3 DOF)
+3. Use a proper observation covariance model (per-joint covariances)
+4. Replace Jacobian autograd with finite differences for speed
+5. Add a learned amortized inference network + 1-step AInf refinement
+
+---
+
+## 17. Summary
+
+This code implements an Active Inference interpretation of human pose modeling:
+
+* Define a kinematic generative model (g(\theta))
+* Assume a Gaussian observation model
+* Minimize variational free energy
+* Perform online belief updates (Laplace approximation)
+* Use priors for plausibility
+* Optionally select actions to reduce uncertainty
+
+It is a principled Bayesian alternative to purely geometric fitting while still reducing to weighted least squares under Gaussian assumptions.

@@ -1,13 +1,11 @@
-# main.py
-# Runs Active Inference pose inference: infer joint angles minimizing free energy per frame.
-
 import argparse
 import numpy as np
 import pyzed.sl as sl
 
 from zed_body18_stream import ZEDBody18Stream
 from human_kinematic_model import lengths_from_standard_np, HumanKinematicModel, KP18_NAMES
-from vfe_inference import ActiveInferencePoseEstimator, InferenceConfig
+from vfe_inference import AInfLaplacePoseEstimator, InferenceConfig
+
 
 def is_tracking_ok(state) -> bool:
     try:
@@ -15,54 +13,55 @@ def is_tracking_ok(state) -> bool:
     except Exception:
         return True
 
+
 def standard_template_np() -> np.ndarray:
     """
     Used ONLY to derive fixed segment lengths + face offsets.
-    Angles are what get inferred online.
+    Joint angles are inferred online.
     """
     kp = np.zeros((18, 3), dtype=np.float32)
 
-    # Face / head
     kp[0]  = [0.0, 1.65, 0.0]      # nose
     kp[14] = [0.08, 1.68, 0.05]    # r_eye
     kp[15] = [-0.08, 1.68, 0.05]   # l_eye
     kp[16] = [0.12, 1.65, 0.0]     # r_ear
     kp[17] = [-0.12, 1.65, 0.0]    # l_ear
 
-    # Neck
-    kp[1]  = [0.0, 1.50, 0.0]
+    kp[1]  = [0.0, 1.50, 0.0]      # neck
 
-    # Shoulders
-    kp[2]  = [0.20, 1.50, 0.0]
-    kp[5]  = [-0.20, 1.50, 0.0]
+    kp[2]  = [0.20, 1.50, 0.0]     # r_shoulder
+    kp[5]  = [-0.20, 1.50, 0.0]    # l_shoulder
 
-    # Arms
-    kp[3]  = [0.35, 1.20, 0.0]
-    kp[4]  = [0.50, 0.95, 0.0]
-    kp[6]  = [-0.35, 1.20, 0.0]
-    kp[7]  = [-0.50, 0.95, 0.0]
+    kp[3]  = [0.35, 1.20, 0.0]     # r_elbow
+    kp[4]  = [0.50, 0.95, 0.0]     # r_wrist
+    kp[6]  = [-0.35, 1.20, 0.0]    # l_elbow
+    kp[7]  = [-0.50, 0.95, 0.0]    # l_wrist
 
-    # Hips
-    kp[8]  = [0.15, 1.00, 0.0]
-    kp[11] = [-0.15, 1.00, 0.0]
+    kp[8]  = [0.15, 1.00, 0.0]     # r_hip
+    kp[11] = [-0.15, 1.00, 0.0]    # l_hip
 
-    # Legs
-    kp[9]  = [0.15, 0.60, 0.0]
-    kp[10] = [0.15, 0.10, 0.0]
-    kp[12] = [-0.15, 0.60, 0.0]
-    kp[13] = [-0.15, 0.10, 0.0]
+    kp[9]  = [0.15, 0.60, 0.0]     # r_knee
+    kp[10] = [0.15, 0.10, 0.0]     # r_ankle
+    kp[12] = [-0.15, 0.60, 0.0]    # l_knee
+    kp[13] = [-0.15, 0.10, 0.0]    # l_ankle
 
     return kp
 
-def print_summary(person_id, conf, mean_l2, rmse, used_anchors):
-    print("\n" + "=" * 100)
-    print(f"Person {person_id} | conf={conf} | mean_L2={mean_l2:.4f} m | RMSE={rmse:.4f} m | anchors={used_anchors}")
-    print("=" * 100)
+
+def print_summary(person_id, conf, mean_l2, rmse, used_anchors, valid_count, uncertainty_trace):
+    print("\n" + "=" * 120)
+    print(
+        f"Person {person_id} | conf={conf} | mean_L2={mean_l2:.4f} m | RMSE={rmse:.4f} m | "
+        f"valid={valid_count}/18 | tr(cov)={uncertainty_trace:.6f} | anchors={used_anchors}"
+    )
+    print("=" * 120)
+
 
 def print_table(live, pred, diff, per_l2):
     print(f"{'kp':>2s}  {'name':<12s} | {'live_x':>8s} {'live_y':>8s} {'live_z':>8s} | "
           f"{'pred_x':>8s} {'pred_y':>8s} {'pred_z':>8s} | {'dx':>8s} {'dy':>8s} {'dz':>8s} | {'L2(m)':>8s}")
-    print("-" * 110)
+    print("-" * 125)
+
     for i, name in enumerate(KP18_NAMES):
         lx, ly, lz = live[i]
         px, py, pz = pred[i]
@@ -75,22 +74,34 @@ def print_table(live, pred, diff, per_l2):
         print(f"{i:2d}  {name:<12s} | {fmt(lx)} {fmt(ly)} {fmt(lz)} | "
               f"{fmt(px)} {fmt(py)} {fmt(pz)} | {fmt(dx)} {fmt(dy)} {fmt(dz)} | {fmte(e)}")
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input_svo_file', type=str, default='')
     parser.add_argument('--ip_address', type=str, default='')
     parser.add_argument('--resolution', type=str, default='')
-    parser.add_argument('--print_every', type=int, default=60)
+    parser.add_argument('--print_every', type=int, default=30)
     parser.add_argument('--no_view', action='store_true')
 
-    # Inference settings
-    parser.add_argument('--iters', type=int, default=60)
-    parser.add_argument('--lr', type=float, default=2e-2)
-    parser.add_argument('--sigma', type=float, default=0.05)
+    # AInf configuration
+    parser.add_argument('--anchors', type=str, default='1,2,5,8,11')
+    parser.add_argument('--device', type=str, default='cpu')
+
+    parser.add_argument('--sigma_obs', type=float, default=0.06)
+    parser.add_argument('--sigma_dyn', type=float, default=0.25)
+    parser.add_argument('--gn_steps', type=int, default=2)
+    parser.add_argument('--damping', type=float, default=1e-3)
+
     parser.add_argument('--w_limits', type=float, default=5.0)
     parser.add_argument('--w_sym', type=float, default=1.0)
-    parser.add_argument('--anchors', type=str, default='1,2,5,8,11')  # neck, shoulders, hips
-    parser.add_argument('--device', type=str, default='cpu')
+
+    parser.add_argument('--sigma_min', type=float, default=0.02)
+    parser.add_argument('--sigma_max', type=float, default=0.15)
+
+    # Action thresholds (simple policy)
+    parser.add_argument('--min_valid', type=int, default=12)
+    parser.add_argument('--uncertainty_thresh', type=float, default=0.05)
+
     opt = parser.parse_args()
 
     if len(opt.input_svo_file) > 0 and len(opt.ip_address) > 0:
@@ -98,21 +109,25 @@ def main():
 
     anchors = [int(x) for x in opt.anchors.split(",") if x.strip() != ""]
 
-    # Fixed morphology (segment lengths) derived once
     template = standard_template_np()
     lengths = lengths_from_standard_np(template)
 
     model = HumanKinematicModel(lengths, device=opt.device).to(opt.device)
+
     cfg = InferenceConfig(
         anchors=anchors,
-        sigma_obs=opt.sigma,
+        device=opt.device,
+        sigma_obs=opt.sigma_obs,
+        sigma_dyn=opt.sigma_dyn,
+        sigma_min=opt.sigma_min,
+        sigma_max=opt.sigma_max,
         w_limits=opt.w_limits,
         w_sym=opt.w_sym,
-        iters=opt.iters,
-        lr=opt.lr,
-        device=opt.device,
+        gn_steps=opt.gn_steps,
+        damping=opt.damping,
     )
-    estimator = ActiveInferencePoseEstimator(model, cfg)
+
+    estimator = AInfLaplacePoseEstimator(model, cfg)
 
     stream = ZEDBody18Stream(opt, enable_view=(not opt.no_view))
     stream.open()
@@ -129,18 +144,26 @@ def main():
                     continue
 
                 live = body["kp3d"].astype(np.float32)
-                res = estimator.infer(live)
+                kp_conf = body.get("kp_conf", None)
 
-                print_summary(body["id"], body["confidence"], res.mean_l2, res.rmse, res.used_anchors)
+                res = estimator.infer(live, kp_conf_np=kp_conf)
+
+                print_summary(
+                    body["id"], body["confidence"],
+                    res.mean_l2, res.rmse,
+                    res.used_anchors,
+                    res.valid_count,
+                    res.uncertainty_trace
+                )
                 print_table(live, res.kp_pred_aligned, res.diff, res.per_l2)
 
-                # Active inference "action" heuristic (expected free energy proxy):
-                valid_count = int(np.isfinite(live).all(axis=1).sum())
-                if valid_count < 12:
-                    print("\n[Action hint] Many joints missing/invalid. Move viewpoint / reduce occlusion / get closer to reduce expected free energy.")
+                # Simple Active Inference "action" policy (expected free energy proxy):
+                if res.valid_count < opt.min_valid or res.uncertainty_trace > opt.uncertainty_thresh:
+                    print("\n[Action hint] High uncertainty / missing joints -> change viewpoint, reduce occlusion, move closer.\n")
 
     finally:
         stream.close()
+
 
 if __name__ == "__main__":
     main()

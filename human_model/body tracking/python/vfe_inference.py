@@ -1,21 +1,18 @@
-# vfe_inference.py
-# Active Inference (perception) via minimizing Variational Free Energy:
-#   F = accuracy(o, g(theta)) + w_limits * joint_limits_prior + w_sym * symmetry_prior
-# g(theta): kinematic keypoints -> Kabsch align to observations (anchors) -> predicted keypoints in live frame.
-
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
 import numpy as np
 import torch
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional
 
 from human_kinematic_model import HumanKinematicModel, default_joint_limits_radians
+
 
 def valid_mask_np(kp: np.ndarray) -> np.ndarray:
     return np.isfinite(kp).all(axis=1)
 
+
 def kabsch_torch(src: torch.Tensor, dst: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Differentiable Kabsch (rotation+translation), no scale.
+    Differentiable rigid alignment (rotation+translation), no scale.
     src, dst: (N,3)
     Returns R (3,3), t (3,)
     """
@@ -28,28 +25,24 @@ def kabsch_torch(src: torch.Tensor, dst: torch.Tensor) -> Tuple[torch.Tensor, to
     U, S, Vh = torch.linalg.svd(H, full_matrices=False)
     V = Vh.t()
 
-    # Proper rotation (avoid reflection) via diagonal correction
+    # Proper rotation (avoid reflection)
     d = torch.sign(torch.linalg.det(V @ U.t()))
     d = torch.where(d == 0, torch.tensor(1.0, device=d.device, dtype=d.dtype), d)
-    D = torch.diag(torch.stack([torch.tensor(1.0, device=d.device), torch.tensor(1.0, device=d.device), d]))
-
+    D = torch.diag(torch.stack([
+        torch.tensor(1.0, device=d.device),
+        torch.tensor(1.0, device=d.device),
+        d
+    ]))
     R = V @ D @ U.t()
     t = dst_mean - (src_mean @ R.t())
     return R, t
 
-@dataclass
-class InferenceConfig:
-    anchors: List[int]
-    sigma_obs: float = 0.05     # meters (likelihood std)
-    w_limits: float = 5.0
-    w_sym: float = 1.0
-    iters: int = 60
-    lr: float = 2e-2
-    device: str = "cpu"
 
 def _angles_from_vector(x: torch.Tensor) -> Dict[str, torch.Tensor]:
-    # x is (16,) ordered:
-    # sh_L(3), sh_R(3), el_L(1), el_R(1), hip_L(3), hip_R(3), kn_L(1), kn_R(1)
+    """
+    x: (16,) ordered:
+      sh_L(3), sh_R(3), el_L(1), el_R(1), hip_L(3), hip_R(3), kn_L(1), kn_R(1)
+    """
     i = 0
     sh_L = x[i:i+3]; i += 3
     sh_R = x[i:i+3]; i += 3
@@ -59,13 +52,21 @@ def _angles_from_vector(x: torch.Tensor) -> Dict[str, torch.Tensor]:
     hip_R = x[i:i+3]; i += 3
     kn_L = x[i:i+1]; i += 1
     kn_R = x[i:i+1]; i += 1
-    return {"sh_L": sh_L, "sh_R": sh_R, "el_L": el_L, "el_R": el_R, "hip_L": hip_L, "hip_R": hip_R, "kn_L": kn_L, "kn_R": kn_R}
+    return {
+        "sh_L": sh_L, "sh_R": sh_R,
+        "el_L": el_L, "el_R": el_R,
+        "hip_L": hip_L, "hip_R": hip_R,
+        "kn_L": kn_L, "kn_R": kn_R
+    }
+
 
 def symmetry_prior(angles: Dict[str, torch.Tensor]) -> torch.Tensor:
     """
-    Left-right symmetry prior (soft).
-    yaw mirrored (L yaw ≈ -R yaw), pitch same, roll mirrored.
-    elbows/knees same flexion.
+    Soft left/right symmetry:
+      yaw mirrored (L yaw ≈ -R yaw),
+      pitch same (L pitch ≈ R pitch),
+      roll mirrored (L roll ≈ -R roll),
+      elbow flex same, knee flex same.
     """
     shL, shR = angles["sh_L"], angles["sh_R"]
     hipL, hipR = angles["hip_L"], angles["hip_R"]
@@ -77,9 +78,11 @@ def symmetry_prior(angles: Dict[str, torch.Tensor]) -> torch.Tensor:
     hinge_err = (elL[0] - elR[0])**2 + (knL[0] - knR[0])**2
     return sh_err + hip_err + hinge_err
 
+
 def joint_limits_prior(x: torch.Tensor, lim: Dict[str, Tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
     """
     Soft penalty for violating joint limits.
+    relu(min - v)^2 + relu(v - max)^2
     """
     angles = _angles_from_vector(x)
 
@@ -102,10 +105,36 @@ def joint_limits_prior(x: torch.Tensor, lim: Dict[str, Tuple[torch.Tensor, torch
     p = p + penalty(angles["kn_R"], kn_min, kn_max)
     return p
 
+
+@dataclass
+class InferenceConfig:
+    anchors: List[int]
+    device: str = "cpu"
+
+    # Observation noise base (used when no confidence provided)
+    sigma_obs: float = 0.06
+
+    # Dynamics prior noise (how fast angles can change frame-to-frame)
+    sigma_dyn: float = 0.25
+
+    # Precision mapping from confidence (optional)
+    sigma_min: float = 0.02
+    sigma_max: float = 0.15
+
+    # Prior weights
+    w_limits: float = 5.0
+    w_sym: float = 1.0
+
+    # AInf update settings
+    gn_steps: int = 2         # Gauss–Newton / Laplace steps per frame
+    damping: float = 1e-3     # Levenberg damping for stability
+
+
 @dataclass
 class InferenceResult:
-    x_opt: np.ndarray              # (16,)
-    kp_pred_aligned: np.ndarray    # (18,3)
+    mu: np.ndarray                 # (16,) posterior mean of angles
+    Lambda: np.ndarray             # (16,16) posterior precision approx
+    kp_pred_aligned: np.ndarray    # (18,3) prediction aligned to live
     R: np.ndarray                  # (3,3)
     t: np.ndarray                  # (3,)
     diff: np.ndarray               # (18,3)
@@ -113,30 +142,81 @@ class InferenceResult:
     mean_l2: float
     rmse: float
     used_anchors: List[int]
+    valid_count: int
+    uncertainty_trace: float       # trace(cov) as a simple uncertainty proxy
 
-class ActiveInferencePoseEstimator:
+
+class AInfLaplacePoseEstimator:
     """
-    Active inference (perception): infer angles to minimize free energy each frame.
-    Warm-starts from previous solution for speed/stability.
+    Active Inference (Laplace approximation):
+      Maintain belief q(theta) ~ N(mu, Sigma)
+      Update mu by minimizing free energy with a Gauss–Newton/Laplace step:
+        delta = H^{-1} g,  mu <- mu - delta
+      where:
+        H ≈ J^T J + Lambda_dyn + Hessian(priors)
+        g = grad(F)
+      Uses precision-weighted prediction errors (optionally from ZED confidence).
     """
+
     def __init__(self, model: HumanKinematicModel, cfg: InferenceConfig):
         self.model = model
         self.cfg = cfg
         self.lim = default_joint_limits_radians(device=cfg.device)
-        self._x_prev = None
 
-    def infer(self, live_kp_np: np.ndarray) -> InferenceResult:
+        D = 16
+        self.mu = torch.zeros(D, device=cfg.device, dtype=torch.float32)
+        self.Lambda = torch.eye(D, device=cfg.device, dtype=torch.float32) * 1.0
+
+    def _joint_precisions(
+        self,
+        valid_mask: np.ndarray,
+        kp_conf: Optional[np.ndarray],
+        device: str
+    ) -> torch.Tensor:
+        """
+        Returns per-valid-joint precision pi (M,) where M = count(valid joints).
+        If kp_conf is None: constant precision 1/sigma_obs^2.
+        Else: sigma(conf) mapped to [sigma_min, sigma_max].
+        """
+        if kp_conf is None:
+            pi = torch.ones(int(valid_mask.sum()), device=device, dtype=torch.float32) * (1.0 / (self.cfg.sigma_obs ** 2))
+            return pi
+
+        conf = kp_conf.astype(np.float32)
+        confv = conf[valid_mask]
+        confv = np.clip(confv, 0.0, 100.0) / 100.0
+
+        sigma = self.cfg.sigma_min + (self.cfg.sigma_max - self.cfg.sigma_min) * (1.0 - confv)
+        pi = 1.0 / (sigma ** 2)
+        return torch.tensor(pi, device=device, dtype=torch.float32)
+
+    def _predict_aligned(self, mu_var: torch.Tensor, live: torch.Tensor, anchors: List[int]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Generates canonical predicted kp from mu_var, then aligns it to live using Kabsch on anchors.
+        Returns (pred_aligned, R, t)
+        """
+        angles = _angles_from_vector(mu_var)
+        kp_pred = self.model(angles)                      # (18,3) canonical
+        R, t = kabsch_torch(kp_pred[anchors], live[anchors])
+        pred_aligned = kp_pred @ R.t() + t
+        return pred_aligned, R, t
+
+    def infer(self, live_kp_np: np.ndarray, kp_conf_np: Optional[np.ndarray] = None) -> InferenceResult:
         device = self.cfg.device
         live = torch.tensor(live_kp_np, dtype=torch.float32, device=device)
 
         valid = valid_mask_np(live_kp_np)
+        valid_count = int(valid.sum())
+
+        # Choose anchors that are valid
         anchors = [i for i in self.cfg.anchors if valid[i]]
         if len(anchors) < 3:
             anchors = [i for i in range(18) if valid[i]]
         if len(anchors) < 3:
             nan = np.full((18, 3), np.nan, dtype=np.float32)
             return InferenceResult(
-                x_opt=np.full((16,), np.nan, dtype=np.float32),
+                mu=self.mu.detach().cpu().numpy(),
+                Lambda=self.Lambda.detach().cpu().numpy(),
                 kp_pred_aligned=nan,
                 R=np.eye(3, dtype=np.float32),
                 t=np.zeros(3, dtype=np.float32),
@@ -145,55 +225,83 @@ class ActiveInferencePoseEstimator:
                 mean_l2=float("nan"),
                 rmse=float("nan"),
                 used_anchors=anchors,
+                valid_count=valid_count,
+                uncertainty_trace=float("inf"),
             )
 
-        # initialize / warm-start
-        if self._x_prev is None:
-            x = torch.zeros(16, device=device, dtype=torch.float32, requires_grad=True)
-        else:
-            x = torch.tensor(self._x_prev, device=device, dtype=torch.float32, requires_grad=True)
+        # Dynamics prior: theta_t ~ N(theta_{t-1}, sigma_dyn^2 I)
+        D = 16
+        mu_prior = self.mu.clone()
+        Lambda_dyn = torch.eye(D, device=device, dtype=torch.float32) * (1.0 / (self.cfg.sigma_dyn ** 2))
 
-        opt = torch.optim.Adam([x], lr=self.cfg.lr)
-        sigma2 = float(self.cfg.sigma_obs ** 2)
+        # Per-joint precision (valid joints only)
+        pi = self._joint_precisions(valid, kp_conf_np, device=device)  # (M,)
 
-        vmask = torch.tensor(valid, device=device)
+        # Gauss–Newton/Laplace steps
+        for _ in range(self.cfg.gn_steps):
+            mu_var = self.mu.clone().detach().requires_grad_(True)
 
-        for _ in range(self.cfg.iters):
-            opt.zero_grad()
+            pred_aligned, R, t = self._predict_aligned(mu_var, live, anchors)
+            diff = live - pred_aligned                             # (18,3)
 
-            angles = _angles_from_vector(x)
-            kp_pred = self.model(angles)  # (18,3) canonical
+            vmask_t = torch.tensor(valid, device=device)
+            diff_v = diff[vmask_t]                                 # (M,3)
 
-            # align predicted -> observed using anchors
-            srcA = kp_pred[anchors]
-            dstA = live[anchors]
-            R, t = kabsch_torch(srcA, dstA)
+            # Residual vector r (M*3,) with sqrt precision
+            # r = sqrt(pi) * diff (applied per joint)
+            w = torch.sqrt(pi).unsqueeze(1)                         # (M,1)
+            r = (w * diff_v).reshape(-1)                            # (M*3,)
 
-            kp_pred_aligned = kp_pred @ R.t() + t
-            diff = live - kp_pred_aligned
+            # Likelihood free energy term: 0.5 * ||r||^2 / M  (mean scaling)
+            F_like = 0.5 * (r @ r) / max(1.0, float(pi.numel()))
 
-            # Likelihood term (Gaussian)
-            diff_valid = diff[vmask]
-            accuracy = 0.5 * (diff_valid.pow(2).sum(dim=1).mean() / sigma2)
+            # Priors (complexity terms)
+            dmu = (mu_var - mu_prior)
+            F_dyn = 0.5 * (dmu[None, :] @ Lambda_dyn @ dmu[:, None]).squeeze()
 
-            # Priors
-            plim = joint_limits_prior(x, self.lim)
-            psym = symmetry_prior(angles)
+            angles = _angles_from_vector(mu_var)
+            F_sym = symmetry_prior(angles)
+            F_lim = joint_limits_prior(mu_var, self.lim)
 
-            F = accuracy + self.cfg.w_limits * plim + self.cfg.w_sym * psym
-            F.backward()
-            opt.step()
+            F = F_like + F_dyn + self.cfg.w_sym * F_sym + self.cfg.w_limits * F_lim
 
-        # final outputs
+            # Gradient of free energy
+            g = torch.autograd.grad(F, mu_var, create_graph=False)[0]  # (D,)
+
+            # Jacobian J = dr/dmu for Gauss–Newton Hessian
+            # For D=16 and M<=18, this is feasible.
+            def r_of(z):
+                predA, _, _ = self._predict_aligned(z, live, anchors)
+                d = (live - predA)[vmask_t]
+                return (w * d).reshape(-1)
+
+            J = torch.autograd.functional.jacobian(r_of, mu_var, create_graph=False)  # (M*3, D)
+
+            # Gauss–Newton Hessian for likelihood: H_like = J^T J / M
+            H_like = (J.t() @ J) / max(1.0, float(pi.numel()))
+
+            # Prior Hessian approximation:
+            # - dynamics prior contributes Lambda_dyn exactly (quadratic)
+            # - for symmetry/limits, we approximate with diagonal damping only (stable + cheap)
+            H_prior = Lambda_dyn
+
+            H = H_like + H_prior + (self.cfg.damping * torch.eye(D, device=device))
+            # Solve H delta = g
+            delta = torch.linalg.solve(H, g)
+
+            # Update mean
+            self.mu = (mu_var.detach() - delta.detach())
+
+            # Update precision estimate (Laplace): Lambda ≈ H
+            self.Lambda = H.detach()
+
+        # Final forward pass for outputs
         with torch.no_grad():
-            angles = _angles_from_vector(x)
-            kp_pred = self.model(angles)
-            R, t = kabsch_torch(kp_pred[anchors], live[anchors])
-            kp_pred_aligned = kp_pred @ R.t() + t
-            diff = live - kp_pred_aligned
+            pred_aligned, R, t = self._predict_aligned(self.mu, live, anchors)
+            diff = live - pred_aligned
 
             diff_np = diff.cpu().numpy()
-            pred_np = kp_pred_aligned.cpu().numpy()
+            pred_np = pred_aligned.cpu().numpy()
 
             per_l2 = np.full((18,), np.nan, dtype=np.float32)
             for i in range(18):
@@ -204,10 +312,17 @@ class ActiveInferencePoseEstimator:
             mean_l2 = float(np.mean(vals)) if vals.size else float("nan")
             rmse = float(np.sqrt(np.mean(vals * vals))) if vals.size else float("nan")
 
-        self._x_prev = x.detach().cpu().numpy().copy()
+            # Uncertainty proxy: trace of covariance
+            # cov = inv(Lambda)
+            try:
+                cov = torch.linalg.inv(self.Lambda)
+                uncertainty_trace = float(torch.trace(cov).cpu().item())
+            except Exception:
+                uncertainty_trace = float("inf")
 
         return InferenceResult(
-            x_opt=self._x_prev.copy(),
+            mu=self.mu.detach().cpu().numpy(),
+            Lambda=self.Lambda.detach().cpu().numpy(),
             kp_pred_aligned=pred_np,
             R=R.cpu().numpy(),
             t=t.cpu().numpy(),
@@ -216,4 +331,6 @@ class ActiveInferencePoseEstimator:
             mean_l2=mean_l2,
             rmse=rmse,
             used_anchors=anchors,
+            valid_count=valid_count,
+            uncertainty_trace=uncertainty_trace,
         )

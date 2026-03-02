@@ -1,12 +1,10 @@
-# zed_body18_stream.py
-# ZED BODY_18 streamer yielding live (18,3) keypoints for each tracked person.
-
 import cv2
 import numpy as np
 import pyzed.sl as sl
 
 import ogl_viewer.viewer as gl
 import cv_viewer.tracking_viewer as cv_viewer
+
 
 def parse_args(init: sl.InitParameters, opt):
     if len(opt.input_svo_file) > 0 and opt.input_svo_file.endswith((".svo", ".svo2")):
@@ -30,6 +28,7 @@ def parse_args(init: sl.InitParameters, opt):
     elif "HD720" in res: init.camera_resolution = sl.RESOLUTION.HD720
     elif "SVGA" in res: init.camera_resolution = sl.RESOLUTION.SVGA
     elif "VGA" in res: init.camera_resolution = sl.RESOLUTION.VGA
+
 
 class ZEDBody18Stream:
     def __init__(self, opt, enable_view: bool = True):
@@ -136,11 +135,24 @@ class ZEDBody18Stream:
                         pad = np.full((18 - kps3d.shape[0], 3), np.nan, dtype=np.float32)
                         kps3d = np.vstack([kps3d, pad])
 
+                    # Per-joint confidence (if available in your ZED SDK version)
+                    kp_conf = None
+                    if hasattr(body, "keypoint_confidence"):
+                        try:
+                            c = np.array(body.keypoint_confidence, dtype=np.float32)
+                            if c.shape[0] >= 18:
+                                kp_conf = c[:18]
+                            else:
+                                kp_conf = None
+                        except Exception:
+                            kp_conf = None
+
                     out_bodies.append({
                         "id": int(body.id),
                         "confidence": int(body.confidence),
                         "tracking_state": body.tracking_state,
                         "kp3d": kps3d,
+                        "kp_conf": kp_conf,  # (18,) or None
                     })
 
                 if self.enable_view:
