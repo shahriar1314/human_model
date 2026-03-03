@@ -124,16 +124,16 @@ def lengths_from_standard_np(standard_kp: np.ndarray) -> SegmentLengths:
 
 class HumanKinematicModel(torch.nn.Module):
     """
-    Inferred angles (16 scalars):
+    Inferred angles (11 scalars):
       sh_L yaw,pitch,roll (3)
       sh_R yaw,pitch,roll (3)
       el_L flex (1)
       el_R flex (1)
-      hip_L yaw,pitch,roll (3)
-      hip_R yaw,pitch,roll (3)
-      kn_L flex (1)
-      kn_R flex (1)
+      lower_body_x (1)
+      lower_body_z (1)
+      lower_body_roll (1)
 
+    Lower body (hips, knees, ankles) is a rigid part on ground plane (x, z, roll).
     NOTE: Face joints are not optimized; they are fixed offsets from NECK.
     """
     def __init__(self, lengths: SegmentLengths, device="cpu"):
@@ -154,25 +154,37 @@ class HumanKinematicModel(torch.nn.Module):
 
         kp = torch.full((18, 3), float("nan"), device=device, dtype=dtype)
 
-        pelvis = torch.zeros(3, device=device, dtype=dtype)
+        # Lower body as rigid part on ground plane
+        # Movement in x, z with rotation about Y (roll)
+        lb_x = angles["lb_x"][0]
+        lb_z = angles["lb_z"][0]
+        lb_roll = angles["lb_roll"][0]
+        
+        # Pelvis position: x, z translation; y stays at 0 (ground)
+        pelvis = torch.tensor([lb_x, 0.0, lb_z], device=device, dtype=dtype)
+        
+        # Rotation matrix for lower body (about Y axis for roll)
+        R_lb = _Ry(lb_roll)
+        
         neck = pelvis + torch.tensor([0.0, L.torso, 0.0], device=device, dtype=dtype)
 
         l_sh = neck + torch.tensor([-L.shoulder_offset_x, 0.0, 0.0], device=device, dtype=dtype)
         r_sh = neck + torch.tensor([ L.shoulder_offset_x, 0.0, 0.0], device=device, dtype=dtype)
 
-        l_hip = pelvis + torch.tensor([-L.hip_offset_x, 0.0, 0.0], device=device, dtype=dtype)
-        r_hip = pelvis + torch.tensor([ L.hip_offset_x, 0.0, 0.0], device=device, dtype=dtype)
+        # Hip positions in local frame (before rotation)
+        l_hip_local = torch.tensor([-L.hip_offset_x, 0.0, 0.0], device=device, dtype=dtype)
+        r_hip_local = torch.tensor([ L.hip_offset_x, 0.0, 0.0], device=device, dtype=dtype)
+        
+        # Apply lower body rotation and add to pelvis
+        l_hip = pelvis + (R_lb @ l_hip_local)
+        r_hip = pelvis + (R_lb @ r_hip_local)
 
         R_sh_L = euler_yaw_pitch_roll(angles["sh_L"][0], angles["sh_L"][1], angles["sh_L"][2])
         R_sh_R = euler_yaw_pitch_roll(angles["sh_R"][0], angles["sh_R"][1], angles["sh_R"][2])
-        R_hip_L = euler_yaw_pitch_roll(angles["hip_L"][0], angles["hip_L"][1], angles["hip_L"][2])
-        R_hip_R = euler_yaw_pitch_roll(angles["hip_R"][0], angles["hip_R"][1], angles["hip_R"][2])
 
         # Hinges (flexion) about local X
         R_el_L = _Rx(angles["el_L"][0])
         R_el_R = _Rx(angles["el_R"][0])
-        R_kn_L = _Rx(angles["kn_L"][0])
-        R_kn_R = _Rx(angles["kn_R"][0])
 
         v_upper_arm = torch.tensor([0.0, -L.upper_arm, 0.0], device=device, dtype=dtype)
         v_lower_arm = torch.tensor([0.0, -L.lower_arm, 0.0], device=device, dtype=dtype)
@@ -183,14 +195,19 @@ class HumanKinematicModel(torch.nn.Module):
         l_wr = l_el + (R_sh_L @ (R_el_L @ v_lower_arm))
         r_wr = r_el + (R_sh_R @ (R_el_R @ v_lower_arm))
 
+        # Thigh and calf vectors in local frame (before rotation)
         v_thigh = torch.tensor([0.0, -L.thigh, 0.0], device=device, dtype=dtype)
         v_calf  = torch.tensor([0.0, -L.calf,  0.0], device=device, dtype=dtype)
 
-        l_kn = l_hip + (R_hip_L @ v_thigh)
-        r_kn = r_hip + (R_hip_R @ v_thigh)
+        # Apply lower body rotation to limb segments
+        v_thigh_rot = R_lb @ v_thigh
+        v_calf_rot = R_lb @ v_calf
+        
+        l_kn = l_hip + v_thigh_rot
+        r_kn = r_hip + v_thigh_rot
 
-        l_an = l_kn + (R_hip_L @ (R_kn_L @ v_calf))
-        r_an = r_kn + (R_hip_R @ (R_kn_R @ v_calf))
+        l_an = l_kn + v_calf_rot
+        r_an = r_kn + v_calf_rot
 
         # Face keypoints (fixed offsets from neck)
         nose = neck + self.nose_off
@@ -224,16 +241,18 @@ class HumanKinematicModel(torch.nn.Module):
 def default_joint_limits_radians(device="cpu") -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Conservative joint limits.
-    For shoulder/hip: yaw, pitch, roll.
-    For elbow/knee: flexion (0 straight).
+    For shoulder: yaw, pitch, roll.
+    For elbow: flexion (0 straight).
+    For lower body: x, z position and roll rotation.
     """
     def to_rad(deg_list):
         return torch.tensor(deg_list, device=device, dtype=torch.float32) * (torch.pi / 180.0)
 
     limits = {
         "sh":  (to_rad([-90.0, -90.0, -90.0]), to_rad([ 90.0,  90.0,  90.0])),
-        "hip": (to_rad([-60.0, -90.0, -45.0]), to_rad([ 60.0,  60.0,  45.0])),
         "el":  (to_rad([  0.0]),               to_rad([150.0])),
-        "kn":  (to_rad([  0.0]),               to_rad([160.0])),
+        "lb_x": (torch.tensor([-1.0], device=device, dtype=torch.float32),  torch.tensor([1.0], device=device, dtype=torch.float32)),
+        "lb_z": (torch.tensor([-1.0], device=device, dtype=torch.float32),  torch.tensor([1.0], device=device, dtype=torch.float32)),
+        "lb_roll": (to_rad([-45.0]), to_rad([45.0])),
     }
     return limits

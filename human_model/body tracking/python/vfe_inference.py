@@ -40,43 +40,39 @@ def kabsch_torch(src: torch.Tensor, dst: torch.Tensor) -> Tuple[torch.Tensor, to
 
 def _angles_from_vector(x: torch.Tensor) -> Dict[str, torch.Tensor]:
     """
-    x: (16,) ordered:
-      sh_L(3), sh_R(3), el_L(1), el_R(1), hip_L(3), hip_R(3), kn_L(1), kn_R(1)
+    x: (11,) ordered:
+      sh_L(3), sh_R(3), el_L(1), el_R(1), lb_x(1), lb_z(1), lb_roll(1)
     """
     i = 0
     sh_L = x[i:i+3]; i += 3
     sh_R = x[i:i+3]; i += 3
     el_L = x[i:i+1]; i += 1
     el_R = x[i:i+1]; i += 1
-    hip_L = x[i:i+3]; i += 3
-    hip_R = x[i:i+3]; i += 3
-    kn_L = x[i:i+1]; i += 1
-    kn_R = x[i:i+1]; i += 1
+    lb_x = x[i:i+1]; i += 1
+    lb_z = x[i:i+1]; i += 1
+    lb_roll = x[i:i+1]; i += 1
     return {
         "sh_L": sh_L, "sh_R": sh_R,
         "el_L": el_L, "el_R": el_R,
-        "hip_L": hip_L, "hip_R": hip_R,
-        "kn_L": kn_L, "kn_R": kn_R
+        "lb_x": lb_x, "lb_z": lb_z, "lb_roll": lb_roll
     }
 
 
 def symmetry_prior(angles: Dict[str, torch.Tensor]) -> torch.Tensor:
     """
-    Soft left/right symmetry:
+    Soft left/right symmetry for upper body only:
       yaw mirrored (L yaw ≈ -R yaw),
       pitch same (L pitch ≈ R pitch),
       roll mirrored (L roll ≈ -R roll),
-      elbow flex same, knee flex same.
+      elbow flex same.
+    Lower body is treated as single rigid part (no symmetry constraint).
     """
     shL, shR = angles["sh_L"], angles["sh_R"]
-    hipL, hipR = angles["hip_L"], angles["hip_R"]
     elL, elR = angles["el_L"], angles["el_R"]
-    knL, knR = angles["kn_L"], angles["kn_R"]
 
     sh_err = (shL[0] + shR[0])**2 + (shL[1] - shR[1])**2 + (shL[2] + shR[2])**2
-    hip_err = (hipL[0] + hipR[0])**2 + (hipL[1] - hipR[1])**2 + (hipL[2] + hipR[2])**2
-    hinge_err = (elL[0] - elR[0])**2 + (knL[0] - knR[0])**2
-    return sh_err + hip_err + hinge_err
+    hinge_err = (elL[0] - elR[0])**2
+    return sh_err + hinge_err
 
 
 def joint_limits_prior(x: torch.Tensor, lim: Dict[str, Tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
@@ -87,9 +83,10 @@ def joint_limits_prior(x: torch.Tensor, lim: Dict[str, Tuple[torch.Tensor, torch
     angles = _angles_from_vector(x)
 
     sh_min, sh_max = lim["sh"]
-    hip_min, hip_max = lim["hip"]
     el_min, el_max = lim["el"]
-    kn_min, kn_max = lim["kn"]
+    lb_x_min, lb_x_max = lim["lb_x"]
+    lb_z_min, lb_z_max = lim["lb_z"]
+    lb_roll_min, lb_roll_max = lim["lb_roll"]
 
     def penalty(v, vmin, vmax):
         return torch.relu(vmin - v).pow(2).sum() + torch.relu(v - vmax).pow(2).sum()
@@ -97,12 +94,11 @@ def joint_limits_prior(x: torch.Tensor, lim: Dict[str, Tuple[torch.Tensor, torch
     p = torch.tensor(0.0, device=x.device)
     p = p + penalty(angles["sh_L"], sh_min, sh_max)
     p = p + penalty(angles["sh_R"], sh_min, sh_max)
-    p = p + penalty(angles["hip_L"], hip_min, hip_max)
-    p = p + penalty(angles["hip_R"], hip_min, hip_max)
     p = p + penalty(angles["el_L"], el_min, el_max)
     p = p + penalty(angles["el_R"], el_min, el_max)
-    p = p + penalty(angles["kn_L"], kn_min, kn_max)
-    p = p + penalty(angles["kn_R"], kn_min, kn_max)
+    p = p + penalty(angles["lb_x"], lb_x_min, lb_x_max)
+    p = p + penalty(angles["lb_z"], lb_z_min, lb_z_max)
+    p = p + penalty(angles["lb_roll"], lb_roll_min, lb_roll_max)
     return p
 
 
@@ -163,7 +159,7 @@ class AInfLaplacePoseEstimator:
         self.cfg = cfg
         self.lim = default_joint_limits_radians(device=cfg.device)
 
-        D = 16
+        D = 11
         self.mu = torch.zeros(D, device=cfg.device, dtype=torch.float32)
         self.Lambda = torch.eye(D, device=cfg.device, dtype=torch.float32) * 1.0
 
@@ -230,7 +226,7 @@ class AInfLaplacePoseEstimator:
             )
 
         # Dynamics prior: theta_t ~ N(theta_{t-1}, sigma_dyn^2 I)
-        D = 16
+        D = 11
         mu_prior = self.mu.clone()
         Lambda_dyn = torch.eye(D, device=device, dtype=torch.float32) * (1.0 / (self.cfg.sigma_dyn ** 2))
 
