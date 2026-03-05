@@ -1,6 +1,8 @@
 import argparse
+import cv2
 import numpy as np
 import pyzed.sl as sl
+from datetime import datetime
 
 from zed_body18_stream import ZEDBody18Stream
 from human_kinematic_model import lengths_from_standard_np, HumanKinematicModel, KP18_NAMES
@@ -82,6 +84,7 @@ def main():
     parser.add_argument('--resolution', type=str, default='')
     parser.add_argument('--print_every', type=int, default=30)
     parser.add_argument('--no_view', action='store_true')
+    parser.add_argument('--output_video', type=str, default='', help='Path to save output video (e.g., output.mp4)')
 
     # AInf configuration
     parser.add_argument('--anchors', type=str, default='1,2,5,8,11')
@@ -132,9 +135,40 @@ def main():
     stream = ZEDBody18Stream(opt, enable_view=(not opt.no_view))
     stream.open()
 
+    # Initialize video writer if output path specified
+    video_writer = None
     frame_idx = 0
+
     try:
         for frame in stream.frames():
+            image_bgr = frame["image_bgr"]
+
+            # Initialize video writer on first valid frame
+            if video_writer is None and image_bgr is not None and len(opt.output_video) > 0:
+                h, w = image_bgr.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                fps = 30.0  # ZED typical FPS
+                video_writer = cv2.VideoWriter(opt.output_video, fourcc, fps, (w, h))
+                if video_writer.isOpened():
+                    print(f"[Video] Saving to {opt.output_video}")
+                else:
+                    print(f"[Video] Failed to open output file {opt.output_video}")
+                    video_writer = None
+
+            # Write frame to video if writer is active
+            if video_writer is not None and image_bgr is not None:
+                img = image_bgr
+
+                # ZED often returns BGRA (H,W,4). VideoWriter expects BGR (H,W,3).
+                if img.ndim == 3 and img.shape[2] == 4:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+                # Make sure type/contiguity are OK for OpenCV
+                if img.dtype != np.uint8:
+                    img = img.astype(np.uint8)
+                img = np.ascontiguousarray(img)
+
+                video_writer.write(img)
             frame_idx += 1
             if (frame_idx % opt.print_every) != 0:
                 continue
@@ -162,6 +196,9 @@ def main():
                     print("\n[Action hint] High uncertainty / missing joints -> change viewpoint, reduce occlusion, move closer.\n")
 
     finally:
+        if video_writer is not None:
+            video_writer.release()
+            print(f"[Video] Saved video successfully")
         stream.close()
 
 
