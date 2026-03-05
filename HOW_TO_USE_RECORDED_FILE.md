@@ -24,7 +24,7 @@ cd shs/RoboLabProjects/human_model/recording/single\ camera/python/
 Example command:
 
 ```bash
-python3 svo_recording.py --output_svo_file "/home/roolab/shs/RoboLabProjects/human_model/body tracking/python/recorded.svo2"
+python3 recording.py --output_svo_file "/home/roolab/shs/RoboLabProjects/human_model/body tracking/python/recorded.svo2"
 ```
 
 Explanation:
