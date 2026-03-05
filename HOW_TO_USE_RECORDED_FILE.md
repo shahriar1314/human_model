@@ -16,7 +16,7 @@ The ZED SDK provides a Python script that records the camera stream into an `.sv
 ## 1.1 Navigate to the recording script
 
 ```bash
-cd shs/RoboLabProjects/human_model/recording/single\ camera/python/
+cd ~/shs/RoboLabProjects/human_model/recording/single\ camera/python/
 ```
 
 ## 1.2 Start recording
