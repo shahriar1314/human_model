@@ -106,7 +106,7 @@ Because the file is in the same directory, only the filename is required.
 
 The system will:
 
-1. Load the SVO file
+1. Load the SVO file 
 2. Replay frames sequentially
 3. Run ZED BODY_18 detection
 4. Feed the detected skeleton to the inference pipeline
