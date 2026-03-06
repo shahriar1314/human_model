@@ -9,33 +9,55 @@ This workflow is useful when experiments need to be reproducible or when process
 
 ---
 
-# 1. Record a ZED Session to an SVO File
+# 1. Clone the Repository
+
+First clone the repository and move into it.
+
+```bash
+git clone https://github.com/<your-username>/human_model.git
+cd human_model
+```
+
+All commands below assume you are inside the **repository root directory**.
+
+---
+
+# 2. Record a ZED Session to an SVO File
 
 The ZED SDK provides a Python script that records the camera stream into an `.svo` or `.svo2` file.
 
-## 1.1 Navigate to the recording script
+## 2.1 Navigate to the recording script
 
 ```bash
-cd ~/shs/RoboLabProjects/human_model/recording/single\ camera/python/
+cd recording/single\ camera/python
 ```
 
-## 1.2 Start recording
+## 2.2 Start recording
 
 Example command:
 
 ```bash
-python3 recording.py --output_svo_file "/home/roolab/shs/RoboLabProjects/human_model/body tracking/python/recorded.svo2"
+python3 recording.py --output_svo_file "../../../body tracking/python/recorded.svo2"
 ```
 
 Explanation:
 
 * `--output_svo_file` specifies where the recording will be saved
 * `.svo` or `.svo2` are the only valid formats supported by the ZED recorder
-* Quotes are required because the folder name contains a space (`body tracking`)
+* Quotes are not required here because the relative path avoids spaces in the command argument
 
-## 1.3 Stop recording
+The file will be saved inside:
+
+```
+human_model/body tracking/python/
+```
+
+---
+
+## 2.3 Stop recording
 
 Recording runs continuously.
+
 Press:
 
 ```
@@ -47,12 +69,12 @@ The SVO file will then be finalized and saved.
 Example output file:
 
 ```
-/home/roolab/shs/RoboLabProjects/human_model/body tracking/python/recorded.svo2
+human_model/body tracking/python/recorded.svo2
 ```
 
 ---
 
-# 2. Run the Human Detection Pipeline on the Recorded File
+# 3. Run the Human Detection Pipeline on the Recorded File
 
 The project supports SVO playback through the argument:
 
@@ -62,15 +84,19 @@ The project supports SVO playback through the argument:
 
 When this argument is provided, the ZED SDK reads frames from the recorded file instead of the live camera.
 
-## 2.1 Navigate to the project directory
+---
 
-Example:
+## 3.1 Navigate to the project directory
+
+From the repository root:
 
 ```bash
-cd ~/shs/RoboLabProjects/human_model/body\ tracking/python
+cd body\ tracking/python
 ```
 
-## 2.2 Run detection on the recorded file
+---
+
+## 3.2 Run detection on the recorded file
 
 ```bash
 python3 main.py --input_svo_file recorded.svo2
@@ -88,9 +114,9 @@ The system will:
 
 ---
 
-# 3. Optional Execution Modes
+# 4. Optional Execution Modes
 
-## 3.1 Run without visualization (faster)
+## 4.1 Run without visualization (faster)
 
 ```bash
 python3 main.py --input_svo_file recorded.svo2 --no_view
@@ -100,7 +126,7 @@ This disables OpenGL and OpenCV visualization and allows faster processing.
 
 ---
 
-## 3.2 Save processed video
+## 4.2 Save processed video
 
 ```bash
 python3 main.py --input_svo_file recorded.svo2 --output_video output.mp4
@@ -110,7 +136,7 @@ The system will save the processed frames to `output.mp4`.
 
 ---
 
-## 3.3 Process SVO faster than real-time (optional code change)
+## 4.3 Process SVO faster than real-time (optional code change)
 
 Inside `ZEDBody18Stream.open()` add:
 
@@ -122,32 +148,33 @@ This allows the pipeline to process frames as fast as the system permits rather 
 
 ---
 
-# 4. Complete Example Workflow
+# 5. Complete Example Workflow
 
 ### Step 1 — Record
 
 ```bash
-cd shs/RoboLabProjects/human_model/recording/single\ camera/python/
+cd human_model
+cd recording/single\ camera/python
 
-python3 recording.py \
---output_svo_file "/home/roolab/shs/RoboLabProjects/human_model/body tracking/python/recorded.svo2"
+python3 recording.py --output_svo_file "../../../body tracking/python/recorded.svo2"
 ```
 
-Press **CTRL + C** to stop.
+Press **CTRL + C** to stop recording.
 
 ---
 
 ### Step 2 — Run detection
 
 ```bash
-cd ~/shs/RoboLabProjects/human_model/body\ tracking/python
+cd ../../..
+cd body\ tracking/python
 
 python3 main.py --input_svo_file recorded.svo2
 ```
 
 ---
 
-# 5. Notes
+# 6. Notes
 
 * Only `.svo` and `.svo2` files are supported for playback.
 * The BODY_18 skeleton detection is executed again during playback.
@@ -155,7 +182,7 @@ python3 main.py --input_svo_file recorded.svo2
 
 ---
 
-# 6. Troubleshooting
+# 7. Troubleshooting
 
 ### Recording fails
 
@@ -168,17 +195,19 @@ Check that:
 Example directory creation:
 
 ```bash
-mkdir -p "/home/roolab/shs/RoboLabProjects/human_model/body tracking/python"
+mkdir -p "body tracking/python"
 ```
 
 ---
 
 ### Verify recording file
 
+Navigate to the directory containing the file:
+
 ```bash
+cd body\ tracking/python
 ls -lh recorded.svo2
 ```
 
 The file size should increase during recording.
 
----
