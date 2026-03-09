@@ -7,6 +7,7 @@ from datetime import datetime
 from zed_body18_stream import ZEDBody18Stream
 from human_kinematic_model import lengths_from_standard_np, HumanKinematicModel, KP18_NAMES
 from vfe_inference import AInfLaplacePoseEstimator, InferenceConfig
+from visualization_compare import render_split_view
 
 
 def is_tracking_ok(state) -> bool:
@@ -181,6 +182,12 @@ def main():
                 kp_conf = body.get("kp_conf", None)
 
                 res = estimator.infer(live, kp_conf_np=kp_conf)
+
+                if image_bgr is not None:
+                    pred_kp = res.kp_pred_aligned
+                    comparison = render_split_view(image_bgr, live, pred_kp)
+                    cv2.imshow("ZED vs Internal Model", comparison)
+                    cv2.waitKey(1)
 
                 print_summary(
                     body["id"], body["confidence"],
