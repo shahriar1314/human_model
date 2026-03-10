@@ -211,3 +211,6 @@ ls -lh recorded.svo2
 
 The file size should increase during recording.
 
+### Next Steps
+
+Count how much time it needs, update the loop, reduce the timing of optimization, reduce the no of variables updates in one loop. 
