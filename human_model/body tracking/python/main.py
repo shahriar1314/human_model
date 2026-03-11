@@ -96,6 +96,11 @@ def main():
     parser.add_argument('--sigma_dyn', type=float, default=0.25)
     parser.add_argument('--gn_steps', type=int, default=2)
     parser.add_argument('--damping', type=float, default=1e-3)
+    parser.add_argument('--step_size', type=float, default=1.0, help='Scaling factor for Newton step (0 < step_size <= 1)')
+    parser.add_argument('--adam_lr', type=float, default=0.01, help='Adam optimizer learning rate')
+    parser.add_argument('--f_tol', type=float, default=1e-4, help='Early-stop tolerance on |F_t - F_{t-1}|')
+    parser.add_argument('--min_steps', type=int, default=3, help='Minimum optimizer steps before early stopping')
+    parser.add_argument('--debug_interval', type=int, default=0, help='Print optimizer debug every N steps (0 disables)')
 
     parser.add_argument('--w_limits', type=float, default=5.0)
     parser.add_argument('--w_sym', type=float, default=1.0)
@@ -130,6 +135,11 @@ def main():
         w_sym=opt.w_sym,
         gn_steps=opt.gn_steps,
         damping=opt.damping,
+        step_size=opt.step_size,
+        adam_lr=opt.adam_lr,
+        f_tol=opt.f_tol,
+        min_steps=opt.min_steps,
+        debug_interval=opt.debug_interval,
     )
 
     estimator = AInfLaplacePoseEstimator(model, cfg)
@@ -140,6 +150,17 @@ def main():
     # Initialize video writer if output path specified
     video_writer = None
     frame_idx = 0
+
+    # ========== ERROR TRACKING ==========
+    error_history = {
+        'mean_l2': [],
+        'rmse': [],
+        'per_l2_all': [],
+        'valid_counts': [],
+        'timestamps': [],
+    }
+    start_time = datetime.now()
+    # =====================================
 
     try:
         for frame in stream.frames():
@@ -199,17 +220,26 @@ def main():
                     cv2.imshow("ZED vs Internal Model", comparison)
                     cv2.waitKey(1)
 
-                print_summary(
-                    body["id"], body["confidence"],
-                    res.mean_l2, res.rmse,
-                    res.used_anchors,
-                    res.valid_count,
-                    res.uncertainty_trace
-                )
-                print_table(live, res.kp_pred_aligned, res.diff, res.per_l2)
+                if frame_idx % opt.print_every == 0:
+                    print_summary(
+                        body["id"], body["confidence"],
+                        res.mean_l2, res.rmse,
+                        res.used_anchors,
+                        res.valid_count,
+                        res.uncertainty_trace
+                    )
+                    print_table(live, res.kp_pred_aligned, res.diff, res.per_l2)
+
+                # ========== COLLECT ERROR DATA ==========
+                error_history['mean_l2'].append(res.mean_l2)
+                error_history['rmse'].append(res.rmse)
+                error_history['per_l2_all'].extend(res.per_l2[res.per_l2 > 0])  # Only valid errors
+                error_history['valid_counts'].append(res.valid_count)
+                error_history['timestamps'].append(datetime.now())
+                # =========================================
 
                 # Simple Active Inference "action" policy (expected free energy proxy):
-                if res.valid_count < opt.min_valid or res.uncertainty_trace > opt.uncertainty_thresh:
+                if frame_idx % opt.print_every == 0 and (res.valid_count < opt.min_valid or res.uncertainty_trace > opt.uncertainty_thresh):
                     print("\n[Action hint] High uncertainty / missing joints -> change viewpoint, reduce occlusion, move closer.\n")
 
             # Calculate and print elapsed time for the frame
@@ -217,13 +247,56 @@ def main():
             elapsed_ms = (frame_end - frame_start) * 1000
             print(f"[Complete Loop ] Frame {frame_idx} processing time: {elapsed_ms:.2f} ms")
             # Inference time is calculated for the last body (person) part. It is out of the for loop, so it will be the time for the last processed body in the frame. For more detailed timing, consider measuring inside the loop for each body.
-            print(f"[Only Inference] Frame {frame_idx} processing time: {infer_time*1000:.2f} ms") 
+            print(f"[Only Inference] Frame {frame_idx} processing time: {infer_time*1000:.2f} ms")
+
+            # ========== PRINT RUNNING AVERAGE ERROR ==========
+            if frame_idx % opt.print_every == 0 and len(error_history['mean_l2']) > 0:
+                elapsed_time = (datetime.now() - start_time).total_seconds()
+                avg_mean_l2 = np.mean(error_history['mean_l2'])
+                avg_rmse = np.mean(error_history['rmse'])
+                avg_valid = np.mean(error_history['valid_counts'])
+                
+                print("\n" + "=" * 120)
+                print(f"[AVERAGE ERROR REPORT] Frames processed: {frame_idx} | Elapsed: {elapsed_time:.1f}s")
+                print(f"  Average Mean L2:      {avg_mean_l2:.4f} m")
+                print(f"  Average RMSE:         {avg_rmse:.4f} m")
+                print(f"  Average Valid Joints: {avg_valid:.1f}/18")
+                if len(error_history['per_l2_all']) > 0:
+                    print(f"  Overall Per-Joint L2: {np.mean(error_history['per_l2_all']):.4f} m")
+                    print(f"  Min Per-Joint L2:     {np.min(error_history['per_l2_all']):.4f} m")
+                    print(f"  Max Per-Joint L2:     {np.max(error_history['per_l2_all']):.4f} m")
+                print("=" * 120 + "\n")
+            # ================================================ 
 
     finally:
         if video_writer is not None:
             video_writer.release()
             print(f"[Video] Saved video successfully")
         stream.close()
+
+        # ========== FINAL ERROR SUMMARY ==========
+        if len(error_history['mean_l2']) > 0:
+            print("\n" + "=" * 120)
+            print("[FINAL ERROR SUMMARY]")
+            elapsed_time = (datetime.now() - start_time).total_seconds()
+            print(f"  Total frames processed: {frame_idx}")
+            print(f"  Total bodies tracked:   {len(error_history['mean_l2'])}")
+            print(f"  Total elapsed time:     {elapsed_time:.1f}s")
+            print(f"\n  Average Mean L2 Error:  {np.mean(error_history['mean_l2']):.4f} m")
+            print(f"  Std Dev Mean L2:        {np.std(error_history['mean_l2']):.4f} m")
+            print(f"  Min Mean L2:            {np.min(error_history['mean_l2']):.4f} m")
+            print(f"  Max Mean L2:            {np.max(error_history['mean_l2']):.4f} m")
+            
+            print(f"\n  Average RMSE:           {np.mean(error_history['rmse']):.4f} m")
+            print(f"  Std Dev RMSE:           {np.std(error_history['rmse']):.4f} m")
+            print(f"  Min RMSE:               {np.min(error_history['rmse']):.4f} m")
+            print(f"  Max RMSE:               {np.max(error_history['rmse']):.4f} m")
+            
+            print(f"\n  Average Valid Joints:   {np.mean(error_history['valid_counts']):.1f}/18")
+            if len(error_history['per_l2_all']) > 0:
+                print(f"  Overall Per-Joint L2:   {np.mean(error_history['per_l2_all']):.4f} m")
+            print("=" * 120)
+        # =========================================
 
 
 if __name__ == "__main__":

@@ -161,7 +161,8 @@ class HumanKinematicModel(torch.nn.Module):
         lb_roll = angles["lb_roll"][0]
         
         # Pelvis position: x, z translation; y stays at 0 (ground)
-        pelvis = torch.tensor([lb_x, 0.0, lb_z], device=device, dtype=dtype)
+        # Use torch.stack() to preserve gradients from lb_x and lb_z
+        pelvis = torch.stack([lb_x, torch.tensor(0.0, device=device, dtype=dtype), lb_z])
         
         # Rotation matrix for lower body (about Y axis for roll)
         R_lb = _Ry(lb_roll)

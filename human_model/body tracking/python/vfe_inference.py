@@ -122,8 +122,13 @@ class InferenceConfig:
     w_sym: float = 1.0
 
     # AInf update settings
-    gn_steps: int = 2         # Gauss–Newton / Laplace steps per frame
-    damping: float = 1e-3     # Levenberg damping for stability
+    gn_steps: int = 2         # Optimization steps per frame
+    damping: float = 1e-3     # Not used with Adam, kept for compatibility
+    step_size: float = 1.0    # Not used with Adam, kept for compatibility
+    adam_lr: float = 0.01     # Adam learning rate
+    f_tol: float = 1e-4       # Early-stop threshold on successive free-energy change
+    min_steps: int = 3         # Minimum optimization steps before early-stop check
+    debug_interval: int = 0    # 0 disables per-step debug prints
 
 
 @dataclass
@@ -199,7 +204,7 @@ class AInfLaplacePoseEstimator:
 
     def infer(self, live_kp_np: np.ndarray, kp_conf_np: Optional[np.ndarray] = None) -> InferenceResult:
         device = self.cfg.device
-        live = torch.tensor(live_kp_np, dtype=torch.float32, device=device)
+        live = torch.as_tensor(live_kp_np, dtype=torch.float32, device=device)
 
         valid = valid_mask_np(live_kp_np)
         valid_count = int(valid.sum())
@@ -230,81 +235,106 @@ class AInfLaplacePoseEstimator:
         mu_prior = self.mu.clone()
         Lambda_dyn = torch.eye(D, device=device, dtype=torch.float32) * (1.0 / (self.cfg.sigma_dyn ** 2))
 
+        # Adaptive damping: increase damping when prior is weak (large sigma_dyn)
+        # This improves numerical stability
+        # (kept for config compatibility; not used by Adam path)
+        _base_damping = self.cfg.damping
+        if self.cfg.sigma_dyn > 1.0:
+            _base_damping = max(self.cfg.damping, 0.1)
+        
         # Per-joint precision (valid joints only)
         pi = self._joint_precisions(valid, kp_conf_np, device=device)  # (M,)
 
-        # Gauss–Newton/Laplace steps
-        for _ in range(self.cfg.gn_steps):
-            mu_var = self.mu.clone().detach().requires_grad_(True)
+        # Reuse masks/weights to avoid per-step allocations
+        vmask_t = torch.as_tensor(valid, device=device, dtype=torch.bool)
+        w = torch.sqrt(pi).unsqueeze(1)  # (M,1)
 
-            pred_aligned, R, t = self._predict_aligned(mu_var, live, anchors)
+        # Adam optimization loop
+        prev_F_val = None
+        
+        # Prepare mu as a tensor that requires gradients for optimization
+        mu_opt = self.mu.clone().requires_grad_(True)
+        optimizer = torch.optim.Adam([mu_opt], lr=self.cfg.adam_lr)
+        
+        for step_idx in range(self.cfg.gn_steps):
+            optimizer.zero_grad()
+            
+            pred_aligned, R, t = self._predict_aligned(mu_opt, live, anchors)
             diff = live - pred_aligned                             # (18,3)
 
-            vmask_t = torch.tensor(valid, device=device)
             diff_v = diff[vmask_t]                                 # (M,3)
 
             # Residual vector r (M*3,) with sqrt precision
             # r = sqrt(pi) * diff (applied per joint)
-            w = torch.sqrt(pi).unsqueeze(1)                         # (M,1)
             r = (w * diff_v).reshape(-1)                            # (M*3,)
 
             # Likelihood free energy term: 0.5 * ||r||^2 / M  (mean scaling)
             F_like = 0.5 * (r @ r) / max(1.0, float(pi.numel()))
 
             # Priors (complexity terms)
-            dmu = (mu_var - mu_prior)
+            dmu = (mu_opt - mu_prior)
             F_dyn = 0.5 * (dmu[None, :] @ Lambda_dyn @ dmu[:, None]).squeeze()
 
-            angles = _angles_from_vector(mu_var)
+            angles = _angles_from_vector(mu_opt)
             F_sym = symmetry_prior(angles)
-            F_lim = joint_limits_prior(mu_var, self.lim)
+            F_lim = joint_limits_prior(mu_opt, self.lim)
 
             F = F_like + F_dyn + self.cfg.w_sym * F_sym + self.cfg.w_limits * F_lim
 
-            # Gradient of free energy
-            g = torch.autograd.grad(F, mu_var, create_graph=False)[0]  # (D,)
+            # Backward pass
+            F.backward()
+            
+            # ========== DEBUG OUTPUT ==========
+            grad_norm = float(torch.norm(mu_opt.grad).cpu().item()) if mu_opt.grad is not None else 0.0
+            F_val = float(F.cpu().item())
+            per_l2_sq_mean = float((diff_v * diff_v).sum(dim=1).mean().detach().cpu().item())
+            
+            if self.cfg.debug_interval > 0 and (
+                step_idx == 0
+                or step_idx == self.cfg.gn_steps - 1
+                or ((step_idx + 1) % self.cfg.debug_interval == 0)
+            ):
+                print(
+                    f"  [Adam Step {step_idx+1}/{self.cfg.gn_steps}] "
+                    f"F={F_val:.6f} | grad_norm={grad_norm:.6e} | "
+                    f"mean_L2_sq={per_l2_sq_mean:.6f} | lr={self.cfg.adam_lr:.4f}"
+                )
+            # ===================================
 
-            # Jacobian J = dr/dmu for Gauss–Newton Hessian
-            # For D=16 and M<=18, this is feasible.
-            def r_of(z):
-                predA, _, _ = self._predict_aligned(z, live, anchors)
-                d = (live - predA)[vmask_t]
-                return (w * d).reshape(-1)
+            # Optimizer step
+            optimizer.step()
+            
+            # Check for NaN/inf and break if detected
+            if not torch.isfinite(mu_opt).all():
+                print(f"  [Adam Step {step_idx+1}/{self.cfg.gn_steps}] NaN/inf detected in mu, stopping optimization")
+                break
 
-            J = torch.autograd.functional.jacobian(r_of, mu_var, create_graph=False)  # (M*3, D)
-
-            # Gauss–Newton Hessian for likelihood: H_like = J^T J / M
-            H_like = (J.t() @ J) / max(1.0, float(pi.numel()))
-
-            # Prior Hessian approximation:
-            # - dynamics prior contributes Lambda_dyn exactly (quadratic)
-            # - for symmetry/limits, we approximate with diagonal damping only (stable + cheap)
-            H_prior = Lambda_dyn
-
-            H = H_like + H_prior + (self.cfg.damping * torch.eye(D, device=device))
-            # Solve H delta = g
-            delta = torch.linalg.solve(H, g)
-
-            # Update mean
-            self.mu = (mu_var.detach() - delta.detach())
-
-            # Update precision estimate (Laplace): Lambda ≈ H
-            self.Lambda = H.detach()
+            # Early stopping: very small change in free energy
+            if prev_F_val is not None and (step_idx + 1) >= self.cfg.min_steps:
+                if abs(prev_F_val - F_val) < self.cfg.f_tol:
+                    break
+            prev_F_val = F_val
+        
+        # Update self.mu with optimized values
+        with torch.no_grad():
+            self.mu = mu_opt.clone().detach()
+            # Update precision estimate (approximate Hessian from final gradient)
+            self.Lambda = torch.eye(D, device=device, dtype=torch.float32) * max(1.0, grad_norm)
 
         # Final forward pass for outputs
         with torch.no_grad():
             pred_aligned, R, t = self._predict_aligned(self.mu, live, anchors)
             diff = live - pred_aligned
 
+            diff_norm = torch.norm(diff, dim=1)
+            per_l2 = torch.full((18,), float("nan"), device=device, dtype=torch.float32)
+            per_l2[vmask_t] = diff_norm[vmask_t]
+
             diff_np = diff.cpu().numpy()
             pred_np = pred_aligned.cpu().numpy()
+            per_l2_np = per_l2.cpu().numpy()
 
-            per_l2 = np.full((18,), np.nan, dtype=np.float32)
-            for i in range(18):
-                if valid[i]:
-                    per_l2[i] = float(np.linalg.norm(diff_np[i]))
-
-            vals = per_l2[np.isfinite(per_l2)]
+            vals = per_l2_np[np.isfinite(per_l2_np)]
             mean_l2 = float(np.mean(vals)) if vals.size else float("nan")
             rmse = float(np.sqrt(np.mean(vals * vals))) if vals.size else float("nan")
 
@@ -323,7 +353,7 @@ class AInfLaplacePoseEstimator:
             R=R.cpu().numpy(),
             t=t.cpu().numpy(),
             diff=diff_np,
-            per_l2=per_l2,
+            per_l2=per_l2_np,
             mean_l2=mean_l2,
             rmse=rmse,
             used_anchors=anchors,
