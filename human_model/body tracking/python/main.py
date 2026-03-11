@@ -1,4 +1,5 @@
 import argparse
+import time 
 import cv2
 import numpy as np
 import pyzed.sl as sl
@@ -171,8 +172,12 @@ def main():
 
                 video_writer.write(img)
             frame_idx += 1
-            if (frame_idx % opt.print_every) != 0:
-                continue
+            # if (frame_idx % opt.print_every) != 0:
+            #     continue
+
+            # to count the total processing time per frame (for performance monitoring)
+            frame_start = time.perf_counter()
+            infer_time = 0.0  # Initialize inference time variable to use it outside of the loop
 
             for body in frame["bodies"]:
                 if not is_tracking_ok(body["tracking_state"]):
@@ -181,7 +186,12 @@ def main():
                 live = body["kp3d"].astype(np.float32)
                 kp_conf = body.get("kp_conf", None)
 
+                
+                # Running VFE_INFERENCE and measure time
+                infer_start = time.perf_counter()
                 res = estimator.infer(live, kp_conf_np=kp_conf)
+                infer_time = time.perf_counter() - infer_start
+                
 
                 if image_bgr is not None:
                     pred_kp = res.kp_pred_aligned
@@ -201,6 +211,13 @@ def main():
                 # Simple Active Inference "action" policy (expected free energy proxy):
                 if res.valid_count < opt.min_valid or res.uncertainty_trace > opt.uncertainty_thresh:
                     print("\n[Action hint] High uncertainty / missing joints -> change viewpoint, reduce occlusion, move closer.\n")
+
+            # Calculate and print elapsed time for the frame
+            frame_end = time.perf_counter()
+            elapsed_ms = (frame_end - frame_start) * 1000
+            print(f"[Complete Loop ] Frame {frame_idx} processing time: {elapsed_ms:.2f} ms")
+            # Inference time is calculated for the last body (person) part. It is out of the for loop, so it will be the time for the last processed body in the frame. For more detailed timing, consider measuring inside the loop for each body.
+            print(f"[Only Inference] Frame {frame_idx} processing time: {infer_time*1000:.2f} ms") 
 
     finally:
         if video_writer is not None:
