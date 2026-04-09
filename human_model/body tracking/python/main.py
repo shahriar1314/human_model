@@ -8,7 +8,7 @@ from datetime import datetime
 from zed_body18_stream import ZEDBody18Stream
 from human_kinematic_model import lengths_from_standard_np, HumanKinematicModel, KP18_NAMES
 from vfe_inference import AInfLaplacePoseEstimator, InferenceConfig
-from visualization_compare import render_split_view
+from visualization_compare import render_split_view, project_to_2d, draw_body18
 
 
 def is_tracking_ok(state) -> bool:
@@ -86,7 +86,9 @@ def main():
     parser.add_argument('--resolution', type=str, default='')
     parser.add_argument('--print_every', type=int, default=30)
     parser.add_argument('--no_view', action='store_true')
-    parser.add_argument('--output_video', type=str, default='', help='Path to save output video (e.g., output.mp4)')
+    parser.add_argument('--output_video', type=str, default='', help='Path to save combined split view video (e.g., output.mp4)')
+    parser.add_argument('--output_zed', type=str, default='', help='Path to save ZED skeleton video (e.g., output_zed.mp4)')
+    parser.add_argument('--output_internal', type=str, default='', help='Path to save internal model skeleton video (e.g., output_internal.mp4)')
 
     # AInf configuration
     parser.add_argument('--anchors', type=str, default='1,2,5,8,11')
@@ -147,8 +149,10 @@ def main():
     stream = ZEDBody18Stream(opt, enable_view=(not opt.no_view))
     stream.open()
 
-    # Initialize video writer if output path specified
+    # Initialize video writers if output paths specified
     video_writer = None
+    video_writer_zed = None
+    video_writer_internal = None
     frame_idx = 0
 
     # ========== ERROR TRACKING ==========
@@ -166,32 +170,35 @@ def main():
         for frame in stream.frames():
             image_bgr = frame["image_bgr"]
 
-            # Initialize video writer on first valid frame
-            if video_writer is None and image_bgr is not None and len(opt.output_video) > 0:
+            # Initialize video writers on first valid frame
+            if image_bgr is not None and (video_writer is None or video_writer_zed is None or video_writer_internal is None):
                 h, w = image_bgr.shape[:2]
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 fps = 30.0  # ZED typical FPS
-                video_writer = cv2.VideoWriter(opt.output_video, fourcc, fps, (w, h))
-                if video_writer.isOpened():
-                    print(f"[Video] Saving to {opt.output_video}")
-                else:
-                    print(f"[Video] Failed to open output file {opt.output_video}")
-                    video_writer = None
-
-            # Write frame to video if writer is active
-            if video_writer is not None and image_bgr is not None:
-                img = image_bgr
-
-                # ZED often returns BGRA (H,W,4). VideoWriter expects BGR (H,W,3).
-                if img.ndim == 3 and img.shape[2] == 4:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-
-                # Make sure type/contiguity are OK for OpenCV
-                if img.dtype != np.uint8:
-                    img = img.astype(np.uint8)
-                img = np.ascontiguousarray(img)
-
-                video_writer.write(img)
+                
+                if video_writer is None and len(opt.output_video) > 0:
+                    video_writer = cv2.VideoWriter(opt.output_video, fourcc, fps, (w * 2, h))
+                    if video_writer.isOpened():
+                        print(f"[Video] Saving split view to {opt.output_video}")
+                    else:
+                        print(f"[Video] Failed to open output file {opt.output_video}")
+                        video_writer = None
+                        
+                if video_writer_zed is None and len(opt.output_zed) > 0:
+                    video_writer_zed = cv2.VideoWriter(opt.output_zed, fourcc, fps, (w, h))
+                    if video_writer_zed.isOpened():
+                        print(f"[Video] Saving ZED skeleton to {opt.output_zed}")
+                    else:
+                        print(f"[Video] Failed to open output file {opt.output_zed}")
+                        video_writer_zed = None
+                        
+                if video_writer_internal is None and len(opt.output_internal) > 0:
+                    video_writer_internal = cv2.VideoWriter(opt.output_internal, fourcc, fps, (w, h))
+                    if video_writer_internal.isOpened():
+                        print(f"[Video] Saving internal model skeleton to {opt.output_internal}")
+                    else:
+                        print(f"[Video] Failed to open output file {opt.output_internal}")
+                        video_writer_internal = None
             frame_idx += 1
             # if (frame_idx % opt.print_every) != 0:
             #     continue
@@ -219,6 +226,31 @@ def main():
                     comparison = render_split_view(image_bgr, live, pred_kp)
                     cv2.imshow("ZED vs Internal Model", comparison)
                     cv2.waitKey(1)
+                    
+                    # Extract and save skeleton panels separately
+                    h, w = image_bgr.shape[:2]
+                    
+                    # Create ZED skeleton panel (green skeleton on white background)
+                    if video_writer_zed is not None:
+                        panel_zed = np.full((h, w, 3), 245, dtype=np.uint8)
+                        live2d = project_to_2d(live, w, h)
+                        panel_zed = draw_body18(panel_zed, live2d, color=(0, 255, 0))
+                        cv2.putText(panel_zed, "ZED BODY_18", (20, 35),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
+                        video_writer_zed.write(panel_zed)
+                    
+                    # Create internal model skeleton panel (red skeleton on white background)
+                    if video_writer_internal is not None:
+                        panel_internal = np.full((h, w, 3), 245, dtype=np.uint8)
+                        pred2d = project_to_2d(pred_kp, w, h)
+                        panel_internal = draw_body18(panel_internal, pred2d, color=(255, 0, 0))
+                        cv2.putText(panel_internal, "Internal Model", (20, 35),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
+                        video_writer_internal.write(panel_internal)
+                    
+                    # Write combined split view if writer is active
+                    if video_writer is not None:
+                        video_writer.write(comparison)
 
                 if frame_idx % opt.print_every == 0:
                     print_summary(
@@ -271,7 +303,13 @@ def main():
     finally:
         if video_writer is not None:
             video_writer.release()
-            print(f"[Video] Saved video successfully")
+            print(f"[Video] Saved split view successfully")
+        if video_writer_zed is not None:
+            video_writer_zed.release()
+            print(f"[Video] Saved ZED skeleton successfully")
+        if video_writer_internal is not None:
+            video_writer_internal.release()
+            print(f"[Video] Saved internal model skeleton successfully")
         stream.close()
 
         # ========== FINAL ERROR SUMMARY ==========
